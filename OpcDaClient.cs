@@ -778,42 +778,64 @@ namespace OpcDaToUaGateway
         }
 
         /// <summary>
-        /// H3 修复：尝试从浏览元素中提取实际数据类型名称。
-        /// TitaniumAS 的 OpcDaBrowseElement 可能没有直接的 DataType 属性，
-        /// 通过反射尝试获取 OPC DA Property（Property ID 1 = DataType）。
-        /// 无法获取时安全回退到 "Variant"。
+                /// <summary>
+        /// 从浏览元素的 ItemProperties 中提取实际数据类型名称。
+        /// TitaniumAS 的 OpcDaBrowseElement.ItemProperties.Properties 数组中包含
+        /// 每个标签的属性（Value、DataType、Quality、Timestamp 等）。
+        /// 优先使用 DataType 属性的 Type 名称（如 Int32、Double、Boolean），
+        /// 回退到 Value 属性的实际类型，最后回退到 "Variant"。
         /// </summary>
         private static string ExtractDataType(OpcDaBrowseElement element)
         {
             try
             {
-                // 尝试通过反射读取 Properties（如果存在）
-                var propInfo = element.GetType().GetProperty("Properties");
-                if (propInfo != null)
+                var itemProps = element.ItemProperties;
+                if (itemProps?.Properties == null)
+                    return "Variant";
+
+                foreach (var prop in itemProps.Properties)
                 {
-                    var properties = propInfo.GetValue(element);
-                    if (properties != null && properties is Array arr && arr.Length > 0)
+                    if (prop.DataType != null)
                     {
-                        foreach (var prop in arr)
-                        {
-                            var valueProp = prop.GetType().GetProperty("Value");
-                            if (valueProp != null)
-                            {
-                                object val = valueProp.GetValue(prop);
-                                if (val != null)
-                                {
-                                    string typeStr = val.ToString();
-                                    if (!string.IsNullOrEmpty(typeStr)
-                                        && typeStr != "System.Object")
-                                        return typeStr;
-                                }
-                            }
-                        }
+                        string typeName = prop.DataType.Name;
+                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object" && typeName != "String")
+                            return MapBclToDataType(typeName);
+                    }
+                    if (prop.Value != null)
+                    {
+                        string typeName = prop.Value.GetType().Name;
+                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object" && typeName != "String")
+                            return MapBclToDataType(typeName);
                     }
                 }
             }
             catch { }
             return "Variant";
+        }
+
+        /// <summary>
+        /// 将 .NET BCL 类型名称映射为 DataTypeConverter 支持的数据类型名。
+        /// </summary>
+        private static string MapBclToDataType(string bclTypeName)
+        {
+            switch (bclTypeName)
+            {
+                case "SByte":
+                case "Int16":
+                case "Int32":
+                case "Int64":
+                case "Byte":
+                case "UInt16":
+                case "UInt32":
+                case "UInt64":
+                    return bclTypeName;
+                case "Single": return "Float";
+                case "Double": return "Double";
+                case "Boolean": return "Boolean";
+                case "String": return "String";
+                case "DateTime": return "DateTime";
+                default: return bclTypeName;
+            }
         }
     }
 
