@@ -1,7 +1,7 @@
 ﻿# Handoff — OPC DA→UA 网关（任务交接文档）
 
 > 用途：在新对话窗口继续本项目任务。新窗口读取本文件 + 关键源码即可接续，无需回溯历史。
-> **交接时间：** 2026-07-17
+> **交接时间：** 2026-07-21
 > **当前版本：** V2.0.0
 > **编译状态：** 0 警告 / 0 错误 ✅（Debug 与 Release 均通过）
 
@@ -127,7 +127,7 @@
 | `Services/GatewayManager.cs` | 已修改 | `StartAsync` 用 `ConfigureAwait(false)`；V1.8.1 新增 `progressReport` 参数透传给 bridge |
 | `MainForm.cs` | 已修改 | 移除客户端列表控件；V1.8.1 新增进度回调通过 SynchronizationContext 投递日志 |
 | `Services/Interfaces/IGatewayOpcUaServer.cs` | 已修改 | 移除 `GetConnectedClients()` 声明 |
-| `OpcDaToUaGateway.csproj` 等三处 | 已修改 | 版本号 V1.8.1 |
+| `OpcDaToUaGateway.csproj` 等三处 | 已修改 | 版本号 V2.0.0 |
 | `OPC_DA转UA网关开发指南.md` / `STATUS.md` / `PLAN.md` | 已更新 | 架构、版本历史、规划 |
 
 ---
@@ -220,11 +220,9 @@
 - D:\Documents\WorkBuddy\OpcDa2Ua\OPC_DA转UA网关开发指南.md（架构与版本历史）
 - D:\Documents\WorkBuddy\OpcDa2Ua\PLAN.md（稳定性与未来规划）
 
-项目现状摘要（截至 2026-07-17）：
 项目现状摘要（截至 2026-07-21）：
-- 已完成：ponytail 代码精简 8 项（删 GateController.cs、GatewayFactory.cs，新建 LicenseManager.cs，MainForm 直连订阅，SafeInvoke 通用化等）；移除「已连接客户端」列表功能；启动卡顿修复（V1.8.0 移除逐节点 Diag，V1.8.1 将节点创建移至后台线程）。
-- 启动卡顿根因（两阶段）：阶段1 — 原 GatewayNodeManager.AddVariableNode 在每次创建变量时调用 Diag()，经 OnStatusChanged→LogManager.Append→BeginInvoke(UpdateTextBox) 向 UI 线程投递数万次更新，UpdateTextBox 每次 O(文本长度) 累计 O(n²)，3.5 万节点约 7 分钟卡死。已移除该逐节点 Diag。阶段2 — 真实环境验证发现 3.5 万次 AddVariableNode 调用仍在 UI 线程同步执行，累积耗时数秒导致窗口"未响应"。V1.8.1 通过 Task.Run 将节点创建循环移至后台线程，UI 线程仅负责进度日志输出。
-- 已否方案：批量加载跳过 AddPredefinedNode（基于错误前提，已回退）。
+- 版本 V2.0.0，Debug 与 Release 均 0 警告 / 0 错误。
+- 已完成：ponytail 代码精简 8 项（删 GateController.cs、GatewayFactory.cs，新建 LicenseManager.cs，MainForm 直连订阅，SafeInvoke 通用化等）；移除「已连接客户端」列表功能；启动卡顿修复（V1.8.0 移除逐节点 Diag，V1.8.1 将节点创建移至后台线程）；DA 标签真实数据类型获取（V2.0.0，临时 Group + CanonicalDataType）。
 - 不能动的边界：GatewayOpcUaServer.cs 核心/订阅节点管理、OpcDaClient.cs、ConfigManager.cs、WatchdogManager.cs、Models/LicenseAlgorithm.cs、Theme.cs、AppConstants.cs、Watchdog/、Keygen/、IHealthSnapshot.cs。
 - 当前无遗留代码任务。
 
@@ -233,5 +231,4 @@
 
 ---
 
-*本 handoff.md 由交接会话生成（2026-07-17），与 STATUS.md / PLAN.md / OPC_DA转UA网关开发指南.md 配套使用。*
-*本 handoff.md 由交接会话生成（2026-07-21），与 STATUS.md / OPC_DA转UA网关开发指南.md 配套使用。
+*本 handoff.md 由交接会话生成（2026-07-21），与 STATUS.md / OPC_DA转UA网关开发指南.md 配套使用。*
