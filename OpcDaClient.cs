@@ -536,7 +536,9 @@ namespace OpcDaToUaGateway
                         Log($"[Browse]   1. OPC DA 服务器是否正常运行且有已配置的标签");
                         Log($"[Browse]   2. 服务器地址空间结构是否为分支嵌套（非扁平根节点）");
                         Log($"[Browse]   3. 可使用 OPC 客户端工具（如 Matrikon OPC Explorer）验证");
-                    }
+                    }                    // V1.9.1: 通过临时 Group 获取真实数据类型
+                    FillRealDataTypes(server, browser, items, Log);
+
                     return items;
                 }
             }
@@ -837,6 +839,67 @@ namespace OpcDaToUaGateway
                 default: return bclTypeName;
             }
         }
+        /// <summary>
+        /// V1.9.1: 通过临时 Group 获取真实数据类型 — 创建不激活的 OPC DA Group 让服务器返回 CanonicalDataType。
+        /// </summary>
+        private static void FillRealDataTypes(OpcDaServer server, OpcDaBrowserAuto browser, List<OpcDaItemInfo> items, Action<string> logger)
+        {
+            if (items == null || items.Count == 0) return;
+
+            OpcDaGroup tempGroup = null;
+            try
+            {
+                var groupState = new OpcDaGroupState { IsActive = false, ClientHandle = 0 };
+                tempGroup = server.AddGroup("_TempBrowseGroup", groupState);
+                logger($"[DataType] 创建临时浏览 Group，准备填充 {items.Count} 个点位的数据类型");
+
+                const int batchSize = 500;
+                for (int batchStart = 0; batchStart < items.Count; batchStart += batchSize)
+                {
+                    int batchEnd = Math.Min(batchStart + batchSize, items.Count);
+                    var batch = items.GetRange(batchStart, batchEnd - batchStart);
+
+                    var definitions = new List<OpcDaItemDefinition>();
+                    foreach (var item in batch)
+                        definitions.Add(new OpcDaItemDefinition { ItemId = item.ItemId, IsActive = false, RequestedDataType = null });
+
+                    OpcDaItemResult[] results = tempGroup.AddItems(definitions);
+
+                    for (int i = 0; i < results.Length && (batchStart + i) < items.Count; i++)
+                    {
+                        var result = results[i];
+                        var itemInfo = items[batchStart + i];
+                        if (result.Error == HRESULT.S_OK && result.Item != null)
+                        {
+                            var dt = result.Item.CanonicalDataType;
+                            if (dt != null)
+                            {
+                                string tn = dt.Name;
+                                if (!string.IsNullOrEmpty(tn) && tn != "Object" && tn != "String")
+                                    itemInfo.DataTypeName = MapBclToDataType(tn);
+                            }
+                        }
+                    }
+
+                    logger($"[DataType] 批次 {batchStart / batchSize + 1} 完成 ({batch.Count} 个点位)");
+                }
+
+                logger($"[DataType] 所有 {items.Count} 个点位的数据类型填充完成");
+            }
+            catch (Exception ex)
+            {
+                logger($"[DataType] 填充失败（回退）: {ex.Message}");
+            }
+            finally
+            {
+                if (tempGroup != null)
+                {
+                    try { tempGroup.RemoveItems(tempGroup.Items); ((System.IDisposable)tempGroup).Dispose(); } catch { }
+                }
+            }
+        }
+
+
     }
 
     /// <summary>
