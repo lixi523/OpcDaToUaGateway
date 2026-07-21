@@ -1,6 +1,6 @@
-# OPC DA 转 OPC UA 网关开发指南
+﻿# OPC DA 转 OPC UA 网关开发指南
 
-**版本：1.8.0**
+**版本：2.0.0**
 
 ## 项目概述
 
@@ -1170,6 +1170,7 @@ WMI 硬件标识（CPU ProcessorId、主板序列号、BIOS 序列号）在同�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| 2.0.0 | 2026-07-21 |**DA 标签真实数据类型获取**：浏览阶段通过临时 OPC DA Group 调用 AddItems，从 OpcDaItem.CanonicalDataType 提取实际数据类型（Integer、Float、Boolean 等），替代原有的固定 Variant 描述；分批处理（每批 500 个点位），失败时静默回退不影响浏览结果。版本号 1.5.0 → 2.0.0。编译 0 警告 0 错误。
 | 1.9.0 | 2026-07-20 |**全面代码审查 + 启动卡顿最终修复 + DA模式切换**：① DataBridge.StartAsync 异步启动（Task.Run 后台线程创建节点 + SynchronizationContext.Post 进度回调），3.5 万节点场景窗口保持响应；② 新增 DA 数据获取方式选择（异步订阅/同步轮询），UI 下拉框 + 配置持久化；③ 首次运行默认填充 ProgId Matrikon.OPC.Simulation.1，开箱即用；④ 未选择服务器时禁用获取点位和启动网关按钮；⑤ Boolean 类型转换增强（支持字符串 true/1/yes 等）；⑥ SourceTimestamp 单调递增修复（bool 翻转标签可被 UA 客户端正确检测）；⑦ Dispose 后重连检查、Monitor.Exit 安全检查、SafeInvoke 句柄防护；⑧ ConfigManager 实现 IDisposable；⑨ 版本号 1.5.0 → 1.9.0；⑩ 删除 PLAN.md（文档整合完成）。编译 0 警告 0 错误。
 | 1.8.0 | 2026-07-16 | **移除「已连接客户端」列表功能并升级版本号**：撤销 V1.7.0(2026-07-15) 在「OPC UA 服务器设置」区右侧新增的「已连接客户端」列表——删除 `MainForm` 的 `_grpClients`/`_lstClients` 控件、`RefreshConnectedClients()` 定时器刷新逻辑及 `SetUiRunningState` 停止清空逻辑；删除 `GatewayOpcUaServer.GetConnectedClients()` 方法与 `GatewayServer.ServerInternalAccess` 属性、`IGatewayOpcUaServer.GetConnectedClients()` 接口声明；OPC UA 设置区分组高度回退至 150、布局恢复紧凑。撤销原因：该列表每 1~3 秒在 UI 线程经 `SessionManager.GetSessions()` 访问 OPC UA SDK 会话管理器，与 UA 客户端请求线程竞争 SDK 内部锁，导致窗口「未响应」；移除后该访问路径彻底消除。**启动卡顿修复：** 启动网关后窗口「未响应」已定位并修复——根因为 `GatewayNodeManager.AddVariableNode` 在每次创建变量节点时调用 `Diag()`，经 `OnStatusChanged`→`_log.Append`→`BeginInvoke` 向 UI 线程投递数万次日志更新（`LogManager.UpdateTextBox` 每次 O(文本长度)、累计 O(n²)），3.5 万节点场景导致约 7 分钟卡死；该 `Diag` 路径独立于 `DataBridge` 已节流的 `Log`，此前排查时未被覆盖（"已排除诊断日志洪泛"结论不准确）。已移除该逐节点诊断调用；节点创建仍走 O(1) 的 `AddPredefinedNode`（经反编译 `Opc.Ua.Server.dll` 1.5.378.145 确认其仅做 `PredefinedNodes` 字典注册 + 空子节点递归，无逐节点通知/地址空间重建）。三个项目版本号统一升至 1.8.0；编译 0 警告 0 错误 ✅ |
 | 1.7.0 (UA 设置区 UI 调整) | 2026-07-15 | **调整「OPC UA 服务器设置」区（版本号保持 1.7.0 不变）**：① 监听地址与安全模式下拉框宽度统一为 140；② 标签「端口」→「端口号」、「最大会话数」→「连接数」，且端口号与连接数左对齐（标签 x=250、控件 x=310）；③ 「自动接受客户端证书」移至安全模式下方独立行；④ 删除「当前安全配置为开放模式，生产环境建议启用加密」警告标签及其 `UpdateSecurityWarning` 逻辑；⑤ 右侧空余区新增「已连接客户端」列表（`GroupBox` + `ListBox`），由 UA 服务器 `GetConnectedClients()`（经 `IServerInternal.SessionManager.GetSessions()` 读取活动会话的 `SessionDiagnostics.SessionName` / `ClientDescription.ApplicationName` / `ApplicationUri`）借 `RefreshStats` 定时器定期刷新、停止时清空；`OPC UA 服务器设置` 分组高度 130→150；编译 0 警告 0 错误 ✅ |

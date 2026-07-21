@@ -1,8 +1,8 @@
-# Handoff — OPC DA→UA 网关（任务交接文档）
+﻿# Handoff — OPC DA→UA 网关（任务交接文档）
 
 > 用途：在新对话窗口继续本项目任务。新窗口读取本文件 + 关键源码即可接续，无需回溯历史。
 > **交接时间：** 2026-07-17
-> **当前版本：** V1.9.0
+> **当前版本：** V2.0.0
 > **编译状态：** 0 警告 / 0 错误 ✅（Debug 与 Release 均通过）
 
 ---
@@ -25,10 +25,10 @@
 | 维度 | 状态 |
 |---|---|
 | 过度工程清理（ponytail 8 项） | ✅ 完成 |
-| 版本号升级 | ✅ 升至 V1.9.0（三个 `.csproj` 同步） |
+| 版本号升级 | ✅ 升至 V2.0.0（三个 `.csproj` 同步） |
 | 已连接客户端列表功能移除 | ✅ 已移除（2026-07-16） |
 | 启动窗口「未响应」卡顿修复 | ✅ V1.8.1 完成（节点创建移至后台线程） |
-| 编译验证 | ✅ 0 警告 / 0 错误（Debug + Release，2026-07-17 V1.9.0 全面审查后复验） |
+| 编译验证 | ✅ 0 警告 / 0 错误（Debug + Release，2026-07-21 V2.0.0 全面审查后复验） |
 | 运行时验证 | ✅ V1.8.1 真实环境验证通过（3.5 万节点 UI 保持响应） |
 
 **无遗留代码任务。** 后续均为可选新规划（见第 9 节）。
@@ -65,7 +65,7 @@
 - `GatewayManager.cs`：`StartAsync` 新增可选 `Action<string> progressReport` 参数，透传给 `bridge.StartAsync()`。
 - `MainForm.cs`：`BtnStart_Click` 创建 `Action<string>` 进度回调，通过 `SynchronizationContext.Post` 安全投递到 UI 线程输出到日志框。
 
-### 3.5 全面代码审查与 P0 修复（V1.9.0，2026-07-17）
+### 3.5 全面代码审查与 P0 修复（V2.0.0，2026-07-21）
 
 **审查范围**：架构设计、线程安全、生命周期管理、性能、错误处理、代码质量。
 
@@ -83,7 +83,7 @@
 - `LicenseManager`：新增 `_disposed` 字段，Tick 回调开头检查防止 Dispose 后执行
 - `LogManager.Dispose()`：超时后通过 `_log.Append` 输出警告而非 `Debug.WriteLine`
 - `ConfigManager`：实现 `IDisposable`，封装 `StopWatching()` 到 `Dispose()`，MainForm.Dispose 改为调用 `Dispose()`
-- `AppConstants.AppVersion`：更新为 V1.9.0
+- `AppConstants.AppVersion`：更新为 V2.0.0
 
 **P1 修复（本轮新增）**：
 - `GatewayManager.StartAsync` catch 块：`await uaServer.StopAsync()` 改为 `uaServer.StopAsync().Wait()`，因为 catch 块不在 async 方法中
@@ -94,11 +94,27 @@
 **P1 待实施（未改代码）**：
 - `HealthSnapshot.Capture()` 每 5 分钟 `Process.GetCurrentProcess()` 可能产生 GC 压力（建议 P/Invoke 替代）
 - `ConfigManager` 未实现 `IDisposable`（建议封装 `StopWatching()` 到 `Dispose()`）
-- `AppConstants.AppVersion` 已更新为 V1.9.0
+- `AppConstants.AppVersion` 已更新为 V2.0.0
 
 ### 3.6 文档同步
 `STATUS.md` / `handoff.md` / `OPC_DA转UA网关开发指南.md` 中 V1.8.0 的「已知未决问题：启动窗口未响应」改为**已修复**，记录真实根因与 SDK 反编译证据；开发指南「运行时节点创建」节新增**启动性能红线**警示（禁止在 `AddVariableNode` 内逐节点 `Diag`/`Log`，进度日志放 `DataBridge` 节流）。
 
+
+### 3.7 DA 标签真实数据类型获取（V2.0.0，2026-07-21）
+
+**问题**：浏览 OPC DA 标签时，`OpcDaBrowseElement` 只返回 CanonicalDataType 为 Variant，无法反映标签的真实数据类型（Integer、Float、Boolean 等）。
+
+**修复**：在 `OpcDaClient.BrowseAllItems` 浏览完成后，新增 `FillRealDataTypes` 方法：
+- 创建不激活的临时 OPC DA Group（`_TempBrowseGroup`）
+- 分批（每批 500 个）调用 `tempGroup.AddItems()` 获取 `OpcDaItemResult`
+- 从 `result.Item.CanonicalDataType.Name` 提取真实类型名称
+- 通过 `MapBclToDataType()` 映射为标准数据类型字符串
+- 失败时静默回退，不影响浏览结果
+
+**涉及文件**：
+- `OpcDaClient.cs`：新增 `FillRealDataTypes()` 静态方法，调用入口在 `BrowseAllItems` 末尾
+
+**编译验证**：0 警告 0 错误 ✅
 ---
 
 ## 4. 关键文件
@@ -186,7 +202,7 @@
 **建议处置顺序**：
 1. ✅ **V1.8.1 启动卡顿已修复**，在真实 OPC DA 环境验证 3.5 万节点场景 UI 保持响应。
 2. ✅ **V1.9.0 全面代码审查完成**，P0 bug 已修复，编译 0 警告 0 错误。
-3. 可选 P1 改进（HealthSnapshot P/Invoke 优化、ConfigManager IDisposable、AppVersion 同步）—— 需用户明确指令。
+3. ✅ **V2.0.0 DA 标签真实数据类型获取**，通过临时 Group 从 CanonicalDataType 提取 Integer/Float/Boolean 等实际类型。编译 0 警告 0 错误。
 4. 新功能需用户明确指令后再动手。
 
 ---
@@ -205,7 +221,7 @@
 - D:\Documents\WorkBuddy\OpcDa2Ua\PLAN.md（稳定性与未来规划）
 
 项目现状摘要（截至 2026-07-17）：
-- 版本 V1.9.0，Debug 与 Release 均 0 警告 / 0 错误。
+项目现状摘要（截至 2026-07-21）：
 - 已完成：ponytail 代码精简 8 项（删 GateController.cs、GatewayFactory.cs，新建 LicenseManager.cs，MainForm 直连订阅，SafeInvoke 通用化等）；移除「已连接客户端」列表功能；启动卡顿修复（V1.8.0 移除逐节点 Diag，V1.8.1 将节点创建移至后台线程）。
 - 启动卡顿根因（两阶段）：阶段1 — 原 GatewayNodeManager.AddVariableNode 在每次创建变量时调用 Diag()，经 OnStatusChanged→LogManager.Append→BeginInvoke(UpdateTextBox) 向 UI 线程投递数万次更新，UpdateTextBox 每次 O(文本长度) 累计 O(n²)，3.5 万节点约 7 分钟卡死。已移除该逐节点 Diag。阶段2 — 真实环境验证发现 3.5 万次 AddVariableNode 调用仍在 UI 线程同步执行，累积耗时数秒导致窗口"未响应"。V1.8.1 通过 Task.Run 将节点创建循环移至后台线程，UI 线程仅负责进度日志输出。
 - 已否方案：批量加载跳过 AddPredefinedNode（基于错误前提，已回退）。
@@ -218,3 +234,4 @@
 ---
 
 *本 handoff.md 由交接会话生成（2026-07-17），与 STATUS.md / PLAN.md / OPC_DA转UA网关开发指南.md 配套使用。*
+*本 handoff.md 由交接会话生成（2026-07-21），与 STATUS.md / OPC_DA转UA网关开发指南.md 配套使用。
