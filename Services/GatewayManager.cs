@@ -76,10 +76,24 @@ namespace OpcDaToUaGateway.Services
         private long _lastReconnectAttemptTicks;
 
         /// <summary>DA 连接断开后的最大自动重连次数</summary>
-        private const int MaxReconnectAttempts = 50;
+        /// <remarks>
+        /// M6 修复：从硬编码常量改为可从配置读取的值。
+        /// 默认 50 次，<see cref="OpcDaConfig.MaxReconnectAttempts"/> 为非正数时使用此默认值。
+        /// </remarks>
+        private const int MaxReconnectAttemptsDefault = 50;
 
-        /// <summary>获取网关当前是否处于运行状态</summary>
-        public volatile bool IsRunning;
+        /// <summary>
+        /// 获取当前有效的最大重连次数。
+        /// 优先使用配置值（<see cref="OpcDaConfig.MaxReconnectAttempts"/>），无效时回退到默认值。
+        /// </summary>
+        private int EffectiveMaxReconnectAttempts
+            => _config.OpcDa.MaxReconnectAttempts > 0 ? _config.OpcDa.MaxReconnectAttempts : MaxReconnectAttemptsDefault;
+
+        /// <summary>网关当前运行状态（Idle / Starting / Running / Stopping / Error）</summary>
+        public GatewayState State { get; private set; } = GatewayState.Idle;
+
+        /// <summary>兼容旧代码：IsRunning 等价于 State == GatewayState.Running</summary>
+        public bool IsRunning => State == GatewayState.Running;
 
         /// <summary>当前 DA 客户端实例（只读，供 UI 定时刷新状态使用）</summary>
         public IOpcDaClient DaClient => _daClient;
@@ -94,12 +108,19 @@ namespace OpcDaToUaGateway.Services
         /// DA 侧状态变化事件。
         /// 参数: (状态文本, 前景色) — UI 层直接用于更新状态标签。
         /// </summary>
+        /// <remarks>
+        /// M7 注意：此事件可能在后台线程（CheckHealth 定时器 / StartAsync 线程池线程）触发，
+        /// 订阅者必须在 UI 线程中处理（如 MainForm 使用 SafeInvoke 封送）。
+        /// </remarks>
         public event Action<string, Color> DaStatusChanged;
 
         /// <summary>
         /// UA 侧状态变化事件。
         /// 参数: (状态文本, 前景色) — UI 层直接用于更新状态标签。
         /// </summary>
+        /// <remarks>
+        /// M7 注意：此事件可能在后台线程触发，订阅者必须在 UI 线程中处理。
+        /// </remarks>
         public event Action<string, Color> UaStatusChanged;
 
         /// <summary>网关运行状态变更。UI 层用于启用/禁用控件。</summary>
@@ -117,7 +138,7 @@ namespace OpcDaToUaGateway.Services
         /// <param name="log">日志管理器，用于记录运行日志（不可为 null）</param>
         /// <param name="config">应用配置，包含 DA 和 UA 的连接参数（不可为 null）</param>
         /// <exception cref="ArgumentNullException">log 或 config 为 null 时抛出</exception>
-        public GatewayManager(LogManager log, AppConfig config)
+        public GatewayManager(LogManager log, AppConfig config, IOpcDaClient daClient = null, IGatewayOpcUaServer uaServer = null, IDataBridge bridge = null)
         {
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _config = config ?? throw new ArgumentNullException(nameof(config));
@@ -138,14 +159,15 @@ namespace OpcDaToUaGateway.Services
         /// <returns>异步任务，在所有步骤完成后结束</returns>
         public async Task StartAsync(Action<string> progressReport = null)
         {
-            // 在锁内做 TOCTOU 安全的条件检查：IsRunning 和 _starting 必须同时为 false
+            // 在锁内做 TOCTOU 安全的条件检查：只有 Idle 状态才能启动
             lock (_lock)
             {
-                if (IsRunning || Interlocked.CompareExchange(ref _startingFlag, 1, 0) != 0) return;
+                if (IsRunning) return;
+                if (_startingFlag != 0) return; // 已在启动中
+                State = GatewayState.Starting;
+                Interlocked.Exchange(ref _startingFlag, 1);
             }
 
-            // 局部变量持有新建资源引用，启动成功后才赋值给字段；
-            // 这样如果中途失败，回滚逻辑可以精确释放已创建的资源，而不影响旧运行实例
             GatewayOpcUaServer uaServer = null;
             OpcDaClient daClient = null;
             DataBridge bridge = null;
@@ -153,30 +175,33 @@ namespace OpcDaToUaGateway.Services
             try
             {
                 _log.Append("[1/3] 启动 OPC UA 服务器...");
-                uaServer = new GatewayOpcUaServer(_config.OpcUa);
+                if (uaServer == null) uaServer = new GatewayOpcUaServer(_config.OpcUa);
                 uaServer.OnStatusChanged += msg =>
                 {
-                    // 调试期间不过滤，确保所有诊断信息可见
                     _log.Append("  " + msg);
                 };
-                // N-5: 当 NamespaceIndex 回写后立即触发保存，防止进程崩溃导致索引丢失
-                uaServer.OnConfigChanged = () => ConfigDirty?.Invoke();
+                uaServer.OnConfigChanged = () =>
+                {
+                    // ConfigDirty 可能在非 UI 线程触发，
+                    // 调用方（MainForm）如果直接操作 UI 控件会抛跨线程异常。
+                    // 此处不做线程切换，由订阅者自行处理线程安全（MainForm 已使用 SafeInvoke）。
+                    ConfigDirty?.Invoke();
+                };
                 await uaServer.StartAsync().ConfigureAwait(false);
 
                 _log.Append("[2/3] 连接 OPC DA 服务器...");
                 string daHost = string.IsNullOrEmpty(_config.OpcDa.ServerHost)
-                    ? "localhost" : _config.OpcDa.ServerHost;
-                daClient = new OpcDaClient(_config.OpcDa.ServerProgId, _config.OpcDa.Tags, daHost);
+                    ? AppConstants.DefaultDaHost : _config.OpcDa.ServerHost;
+                if (daClient == null) { daClient = new OpcDaClient(_config.OpcDa.ServerProgId, _config.OpcDa.Tags, daHost); }
                 daClient.OnStatusChanged += msg =>
                 {
-                    // 同样过滤掉诊断信息
                     if (!msg.StartsWith("[诊断]"))
                         _log.Append("  " + msg);
                 };
                 daClient.Start(_config.OpcDa.UpdateRateMs, _config.OpcDa.GetEffectiveMode());
 
                 _log.Append("[3/3] 启动数据桥接...");
-                bridge = new DataBridge(daClient, uaServer, _config.OpcDa.Tags);
+                if (bridge == null) bridge = new DataBridge(daClient, uaServer, _config.OpcDa.Tags);
                 bridge.OnLog += msg => _log.Append(msg);
                 await bridge.StartAsync(progressReport).ConfigureAwait(false);
 
@@ -186,9 +211,9 @@ namespace OpcDaToUaGateway.Services
                     _uaServer = uaServer;
                     _daClient = daClient;
                     _bridge = bridge;
-                    IsRunning = true;
+                    State = GatewayState.Running;
                     _reconnectAttempts = 0;
-                    _lastReconnectAttemptTicks = 0; // H-34
+                    _lastReconnectAttemptTicks = 0;
                     _startingFlag = 0;
                 }
 
@@ -202,11 +227,9 @@ namespace OpcDaToUaGateway.Services
             }
             catch (Exception ex)
             {
-                // 输出完整异常信息（含类型、消息、堆栈）方便定位
                 _log.Append($"启动失败: {ex.GetType().Name}: {ex.Message}");
                 if (!string.IsNullOrEmpty(ex.StackTrace))
                 {
-                    // 堆栈太长时分多行输出，前 3 行通常已足够定位
                     string[] lines = ex.StackTrace.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
                     int showLines = Math.Min(3, lines.Length);
                     for (int i = 0; i < showLines; i++)
@@ -215,18 +238,22 @@ namespace OpcDaToUaGateway.Services
                 if (ex.InnerException != null)
                     _log.Append($"  内部异常: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
 
-                // 回滚策略：按创建的逆序释放（bridge → daClient → uaServer），
-                // 每个释放调用独立 try-catch，防止单个异常阻断后续清理。
-                // 同时重置 _starting 标志，允许用户修复问题后重试。
+                // 回滚已创建资源
                 _log.Append("正在回滚已创建资源...");
-                lock (_lock) { _startingFlag = 0; }
+                lock (_lock)
+                {
+                    _startingFlag = 0;
+                    State = GatewayState.Error;
+                }
                 RunningStateChanged?.Invoke(false);
-                try { bridge?.Dispose(); } catch { }
-                try { daClient?.Dispose(); } catch { }
+try { bridge?.Dispose(); } catch (Exception ex2) { _log.Append($"[网关] 释放 DataBridge 失败: {ex2.Message}"); }
+try { daClient?.Dispose(); } catch (Exception ex2) { _log.Append($"[网关] 释放 OpcDaClient 失败: {ex2.Message}"); }
                 if (uaServer != null)
                 {
-                    try { uaServer.StopAsync().Wait(); } catch { }
-                    try { uaServer.Dispose(); } catch { }
+                    // 避免 .Wait() 导致 SynchronizationContext 死锁，
+                    // 改用 ConfigureAwait(false) + Task.Wait 在线程池上下文中执行。
+try { uaServer.StopAsync().ConfigureAwait(false).GetAwaiter().GetResult(); } catch (Exception ex2) { _log.Append($"[网关] UA Server 停止失败: {ex2.Message}"); }
+try { uaServer.Dispose(); } catch (Exception ex2) { _log.Append($"[网关] UA Server 释放失败: {ex2.Message}"); }
                 }
                 throw;
             }
@@ -249,12 +276,10 @@ namespace OpcDaToUaGateway.Services
             IGatewayOpcUaServer uaServer;
             IDataBridge bridge;
 
-            // 在锁内原子地捕获当前引用并置空字段、标记停止。
-            // 后续操作在锁外执行：释放可能耗时，不应持锁阻塞其他调用者。
             lock (_lock)
             {
                 if (!IsRunning) return;
-                IsRunning = false;
+                State = GatewayState.Stopping;
                 daClient = _daClient;
                 uaServer = _uaServer;
                 bridge = _bridge;
@@ -265,16 +290,19 @@ namespace OpcDaToUaGateway.Services
 
             _log.Append("正在停止网关...");
 
-            // 每个 Dispose 独立 try-catch：即使 bridge.Dispose() 抛异常，
-            // daClient 和 uaServer 仍会被正常释放，避免级联资源泄漏
-            try { bridge?.Dispose(); } catch { }
-            try { daClient?.Dispose(); } catch { }
+try { bridge?.Dispose(); } catch (Exception ex) { _log.Append($"[网关] 停止时释放 DataBridge 失败: {ex.Message}"); }
+try { daClient?.Dispose(); } catch (Exception ex) { _log.Append($"[网关] 停止时释放 OpcDaClient 失败: {ex.Message}"); }
 
             if (uaServer != null)
             {
                 try { await uaServer.StopAsync(); }
                 catch (Exception ex) { _log.Append($"停止 UA 服务器时出错: {ex.Message}"); }
-                try { uaServer.Dispose(); } catch { }
+try { uaServer.Dispose(); } catch (Exception ex) { _log.Append($"[网关] UA Server 最终释放失败: {ex.Message}"); }
+            }
+
+            lock (_lock)
+            {
+                State = GatewayState.Idle;
             }
 
             DaStatusChanged?.Invoke("● DA: 未连接", Color.Gray);
@@ -282,6 +310,22 @@ namespace OpcDaToUaGateway.Services
             RunningStateChanged?.Invoke(false);
 
             _log.Append("网关已停止");
+        }
+
+        /// <summary>
+        /// 清除错误状态，将网关重置为 Idle，允许用户修复问题后重试启动。
+        /// 仅在 State == Error 时有效，防止在 Running 时意外重置。
+        /// </summary>
+        public void ClearErrorState()
+        {
+            lock (_lock)
+            {
+                if (State != GatewayState.Error) return;
+                // 同时检查 _startingFlag，防止在 StartAsync 异常回滚过程中被意外重置
+                if (_startingFlag != 0) return;
+                State = GatewayState.Idle;
+                _startingFlag = 0;
+            }
         }
 
         /// <summary>
@@ -312,63 +356,63 @@ namespace OpcDaToUaGateway.Services
             {
                 if (daClient.IsConnected) return;
 
-                // 使用 Interlocked 保证并发调用 CheckHealth 时计数器的原子递增
                 int attempts = Interlocked.Increment(ref _reconnectAttempts);
 
-                // H-34: 指数退避 — 避免 DA 服务器长时间不可用时密集重连风暴
-                //       初始 1s，每次失败翻倍，上限 60s
                 long nowTicks = DateTime.UtcNow.Ticks;
                 long lastTicks = Interlocked.Read(ref _lastReconnectAttemptTicks);
                 int backoffMs = (int)Math.Min(1000L * (1L << Math.Min(attempts, 6)), 60000L);
                 long elapsedMs = (nowTicks - lastTicks) / TimeSpan.TicksPerMillisecond;
-                if (lastTicks > 0 && elapsedMs < backoffMs) return; // 退避期间跳过
+                if (lastTicks > 0 && elapsedMs < backoffMs) return;
                 Interlocked.Exchange(ref _lastReconnectAttemptTicks, nowTicks);
 
-                // H-32 修复：超过上限后立即截断，防止 int 溢出（虽然需要 ~21 亿次，但设计上不该依赖这个）。
-                // 使用 Interlocked.CompareExchange 确保截断的原子性，避免与并发 Increment 竞态。
-                if (attempts > MaxReconnectAttempts)
+                // 此处存在一个理论上的竞态——如果两个线程同时到达这里，
+                // Interlocked.Increment 分别返回 N 和 N+1，但 CompareExchange 的比较值
+                // 可能已被对方修改导致失败。实际效果是多尝试一次重连，不会导致严重错误。
+                // 由于 CheckHealth 调用频率很低（秒级），此竞态窗口极窄，暂不引入额外锁。
+                if (attempts > EffectiveMaxReconnectAttempts)
                 {
-                    // 截断到 MaxReconnectAttempts+1，保留"已超限"信号但不再增长
-                    Interlocked.CompareExchange(ref _reconnectAttempts, MaxReconnectAttempts + 1, attempts);
-                    attempts = MaxReconnectAttempts + 1;
+                    Interlocked.CompareExchange(ref _reconnectAttempts, EffectiveMaxReconnectAttempts + 1, attempts);
+                    attempts = EffectiveMaxReconnectAttempts + 1;
                 }
 
-                if (attempts <= MaxReconnectAttempts)
+                if (attempts <= EffectiveMaxReconnectAttempts)
                 {
-                    _log.Append($"[监控] DA 连接断开，尝试重连 ({attempts}/{MaxReconnectAttempts})...");
+                    _log.Append($"[监控] DA 连接断开，尝试重连 ({attempts}/{EffectiveMaxReconnectAttempts})...");
                     DaStatusChanged?.Invoke("● DA: 重连中...", Color.Orange);
 
                     bool success = daClient.TryReconnect(_config.OpcDa.UpdateRateMs);
 
                     if (success)
                     {
-                        // 重连成功：使用原子交换归零，防止与并发 CheckHealth 的 Increment 竞态
                         Interlocked.Exchange(ref _reconnectAttempts, 0);
-                        Interlocked.Exchange(ref _lastReconnectAttemptTicks, 0); // H-34: 重置退避计时
+                        Interlocked.Exchange(ref _lastReconnectAttemptTicks, 0);
                         DaStatusChanged?.Invoke("● DA: 已连接", Color.Green);
                         _log.Append("[监控] DA 重连成功");
                     }
                 }
-                else if (attempts == MaxReconnectAttempts + 1)
+                else if (attempts == EffectiveMaxReconnectAttempts + 1)
                 {
-                    // 仅在刚好超过上限的那一次打印告警，避免每次 CheckHealth 都重复提示
                     _log.Append("[监控] 达到最大重连次数，停止重连。请手动检查 OPC DA 服务器。");
                     DaStatusChanged?.Invoke("● DA: 重连失败", Color.Red);
                 }
             }
             catch (ObjectDisposedException)
             {
-                // 为什么需要捕获 ObjectDisposedException：
                 // CheckHealth 在锁外操作 daClient 的 IsConnected / TryReconnect 方法时，
                 // StopAsync 可能在另一个线程完成了对 daClient 的 Dispose。
-                // 锁内快照只能保证我们拿到的引用不为 null，但无法阻止对象在锁外被释放。
-                // 这是正常的生命周期交叉，安全忽略即可 — 下一轮 CheckHealth 会因
-                // IsRunning == false 而直接返回。
+                // 这是正常的生命周期交叉，安全忽略即可。
             }
             catch (Exception ex)
             {
                 _log.Append($"[监控] 健康检查异常: {ex.Message}");
+                // 运行时异常 → 标记 Error 状态
+                lock (_lock)
+                {
+                    if (IsRunning)
+                        State = GatewayState.Error;
+                }
             }
         }
     }
 }
+

@@ -49,7 +49,7 @@ namespace OpcDaToUaGateway.Keygen
             Console.Title = "OPC DA to UA Gateway - 授权码计算工具";
 
             Console.WriteLine("================================================");
-            Console.WriteLine("  OPC DA → OPC UA 网关 授权码计算工具 v1.5.0");
+            Console.WriteLine("  OPC DA → OPC UA 网关 授权码计算工具 v2.4.0");
             Console.WriteLine("================================================");
             Console.WriteLine();
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
@@ -32,9 +32,9 @@ namespace OpcDaToUaGateway
     public class DataBridge : IDataBridge
     {
         // DA 客户端引用（所有权归 MainForm，此处仅用于订阅事件和读取数据）
-        private readonly OpcDaClient _daClient;
+        private readonly IOpcDaClient _daClient;
         // UA 服务器引用（所有权归 MainForm，此处仅用于更新变量节点）
-        private readonly GatewayOpcUaServer _uaServer;
+        private readonly IGatewayOpcUaServer _uaServer;
 
         // 按 TagKey 索引的标签配置映射，用于在数据变化时快速查找标签元数据
         private readonly ConcurrentDictionary<string, TagConfig> _tagMap;
@@ -45,23 +45,24 @@ namespace OpcDaToUaGateway
         private readonly Dictionary<string, BuiltInType> _cachedTypes = new Dictionary<string, BuiltInType>();
 
         // 运行时统计计数器，使用 Interlocked 保证跨线程原子性
-        private int _totalUpdates;
+        // 使用 long 防溢出。35K 标签每秒更新时，int 约 17 小时溢出。
+        private long _totalUpdates;
         private int _errorCount;
         // 最后更新时间的 Ticks 值（long），通过 Interlocked.Exchange 原子写入
         private long _lastUpdateTicks;
-        // H-27 修复：使用 Interlocked.Exchange 原子操作替代 volatile bool 的 check-then-set。
+        // 使用 Interlocked.Exchange 原子操作替代 volatile bool 的 check-then-set。
         // 原因：volatile bool + if (_disposed) return; _disposed = true; 不是原子操作，
         // 两个并发 Dispose() 可能同时通过检查。Interlocked.Exchange 保证只有一个线程拿到旧值 0。
         // 与 OpcDaClient._disposedInt 和 GatewayOpcUaServer._disposedInt 保持一致。
         private int _disposedInt;
 
-        // R-3 修复：预编译类型转换委托缓存，避免每次数据回调时 switch-case 分支预测开销。
+        // 预编译类型转换委托缓存，避免每次数据回调时 switch-case 分支预测开销。
         // 使用静态数组而非字典——BuiltInType 枚举值范围小（0~25），数组索引 O(1) 无哈希冲突。
         // 每个委托内联快速路径类型检查（is pattern），匹配时零分配返回，不匹配时调用 Convert.To*。
         private static readonly Func<object, object>[] TypeConverters;
 
         /// <summary>
-        /// R-3 修复：静态构造器一次性填充所有类型转换委托。
+        /// 静态构造器一次性填充所有类型转换委托。
         /// 线程安全保证：CLR 保证静态构造器在类型首次使用前执行且仅执行一次。
         /// 35K 标签回调场景下，避免每次回调都经过 switch-case 分支预测开销。
         /// </summary>
@@ -99,7 +100,7 @@ namespace OpcDaToUaGateway
         }
 
         /// <summary>获取累计成功更新次数（线程安全读取）。</summary>
-        public int TotalUpdates => Volatile.Read(ref _totalUpdates);
+        public long TotalUpdates => Volatile.Read(ref _totalUpdates);
 
         /// <summary>获取累计错误次数（线程安全读取）。</summary>
         public int ErrorCount => Volatile.Read(ref _errorCount);
@@ -127,7 +128,7 @@ namespace OpcDaToUaGateway
         /// <param name="daClient">OPC DA 客户端实例（由调用方管理生命周期）。</param>
         /// <param name="uaServer">OPC UA 网关服务器实例（由调用方管理生命周期）。</param>
         /// <param name="tags">要桥接的标签配置列表，顺序决定了 UI 显示顺序。</param>
-        public DataBridge(OpcDaClient daClient, GatewayOpcUaServer uaServer, List<TagConfig> tags)
+        public DataBridge(IOpcDaClient daClient, IGatewayOpcUaServer uaServer, List<TagConfig> tags)
         {
             _daClient = daClient;
             _uaServer = uaServer;
@@ -358,8 +359,8 @@ namespace OpcDaToUaGateway
         }
 
         /// <summary>
-        /// R-3 修复：使用预编译委托缓存替代 switch-case，O(1) 数组索引无分支预测开销。
-        /// R-1 修复：增加 DBNull、COM decimal、未知类型等边缘情况的兼容处理。
+        /// 使用预编译委托缓存替代 switch-case，O(1) 数组索引无分支预测开销。
+        /// 增加 DBNull、COM decimal、未知类型等边缘情况的兼容处理。
         /// </summary>
         private object ConvertValue(string tagKey, object value)
         {
@@ -379,8 +380,9 @@ namespace OpcDaToUaGateway
                 }
                 return value;
             }
-            catch
+            catch (Exception ex)
             {
+                Log($"标签 [{tagKey}] 类型转换失败 ({targetType}): {ex.Message}，使用原始值");
                 return value;
             }
         }
@@ -415,3 +417,5 @@ namespace OpcDaToUaGateway
         }
     }
 }
+
+

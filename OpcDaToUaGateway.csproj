@@ -10,12 +10,12 @@
     <LangVersion>8.0</LangVersion>
     <!-- OPC DA 服务器通常是 32 位 COM 组件，必须以 x86 运行才能正确调用 -->
     <PlatformTarget>x86</PlatformTarget>
-    <ApplicationIcon>app.ico</ApplicationIcon>
+    <ApplicationIcon>opc-da-opc-ua.ico</ApplicationIcon>
     <!-- 要求以管理员权限运行：嵌入清单文件，requestedExecutionLevel=requireAdministrator -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.0.0</Version>
-    <AssemblyVersion>2.0.0.0</AssemblyVersion>
-    <FileVersion>2.0.0.0</FileVersion>
+    <Version>2.4.0</Version>
+    <AssemblyVersion>2.4.0.0</AssemblyVersion>
+    <FileVersion>2.4.0.0</FileVersion>
     <Company>OPC DA to UA Gateway</Company>
     <Product>OPC DA to OPC UA Gateway</Product>
     <Description>OPC DA 到 OPC UA 协议转换网关</Description>
@@ -28,6 +28,7 @@
     <None Remove="Watchdog\**" />
     <EmbeddedResource Remove="Watchdog\**" />
     <Compile Remove="Keygen\**" />
+    <Compile Remove="Tests\**" />
     <None Remove="Keygen\**" />
     <EmbeddedResource Remove="Keygen\**" />
   </ItemGroup>
@@ -50,6 +51,8 @@
   <ItemGroup>
     <!-- dynamic 关键字支持（COM Automation 接口需要）-->
     <Reference Include="Microsoft.CSharp" />
+    <!-- Windows DPAPI（试用累计时间本机保护存储）-->
+    <Reference Include="System.Security" />
     <!-- WMI 硬件信息查询（授权码 PCID 生成需要）-->
     <Reference Include="System.Management" />
   </ItemGroup>
@@ -76,3 +79,5 @@
   </Target>
 
 </Project>
+
+

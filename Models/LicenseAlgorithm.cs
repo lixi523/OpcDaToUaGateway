@@ -28,7 +28,7 @@ namespace OpcDaToUaGateway
     public static class LicenseAlgorithm
     {
         // =====================================================================
-        // C-11 修复：三层异或混淆密钥存储
+        // 三层异或混淆密钥存储
         // =====================================================================
         // 真实密钥 = SHA256(_layer1 XOR _layer2 XOR _layer3)
         //
@@ -96,6 +96,12 @@ namespace OpcDaToUaGateway
         }
 
         /// <summary>
+        /// 获取 AES 加密密钥，用于加密配置文件中存储的授权码。
+        /// 授权码不再明文存储，使用 AES-256-CBC 加密后写入 config.json。
+        /// </summary>
+        public static byte[] GetEncryptionKey() => DeriveKey();
+
+        /// <summary>
         /// 生成机器唯一标识 PCID（Personal Computer ID），基于硬件指纹。
         /// 
         /// <para>PCID 由以下 WMI 硬件属性组合后经 SHA256 哈希生成：
@@ -120,7 +126,7 @@ namespace OpcDaToUaGateway
             string boardSerial = GetWmiValue("Win32_BaseBoard", "SerialNumber");
             string biosSerial = GetWmiValue("Win32_BIOS", "SerialNumber");
 
-            // P4 修复：所有硬件标识获取失败时拒绝生成，防止共享 PCID 导致授权绕过
+            // 所有硬件标识获取失败时拒绝生成，防止共享 PCID 导致授权绕过
             if (cpuId == "UNKNOWN" && boardSerial == "UNKNOWN" && biosSerial == "UNKNOWN")
                 throw new InvalidOperationException(
                     "无法获取硬件标识（WMI 查询全部失败），请检查 WMI 服务是否正常运行。");
@@ -200,7 +206,7 @@ namespace OpcDaToUaGateway
             string trimmed = authCode.Trim().ToUpperInvariant();
             string a = expected.ToUpperInvariant();
 
-            // H-12 修复：常数时间比较
+            // 常数时间比较
             // 将长度差异编码到 diff 中：如果两个字符串长度不同，XOR 结果非零，
             // diff 从一开始就不为零，后续遍历不会改变这个事实。
             // 这避免了先比较长度再比较内容的分支差异（短字符串提前返回的耗时差异）。

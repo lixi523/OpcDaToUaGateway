@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace OpcDaToUaGateway
 {
@@ -83,6 +83,9 @@ namespace OpcDaToUaGateway
         /// <summary>健康检查间隔 (ms)</summary>
         public const int HealthCheckIntervalMs = 10000;
 
+        /// <summary>健康快照采集间隔（分钟）— 默认每 5 分钟采集一次进程健康指标</summary>
+        public const int HealthSnapshotIntervalMinutes = 5;
+
         // ══════════════════════════════════════════════════
         //  配置
         // ══════════════════════════════════════════════════
@@ -92,6 +95,12 @@ namespace OpcDaToUaGateway
 
         /// <summary>默认会话超时 (ms)</summary>
         public const int DefaultSessionTimeoutMs = 120000;
+
+        /// <summary>默认 OPC DA 主机名</summary>
+        public const string DefaultDaHost = "localhost";
+
+        /// <summary>未知数据类型占位符</summary>
+        public const string UnknownDataType = "Variant";
 
         // ══════════════════════════════════════════════════
         //  UI
@@ -111,7 +120,7 @@ namespace OpcDaToUaGateway
         // ══════════════════════════════════════════════════
 
         /// <summary>当前软件版本</summary>
-        public const string AppVersion = "2.0.0";
+        public const string AppVersion = "2.4.0";
 
         /// <summary>窗口标题（不含版本号）</summary>
         public const string WindowTitle = "OPC DA → OPC UA 网关";

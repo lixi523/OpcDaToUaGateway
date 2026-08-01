@@ -1,71 +1,72 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Threading;
 using System.IO;
 using System.Linq;
-using System.Threading;
 using Newtonsoft.Json;
-using OpcDaToUaGateway.Services.Interfaces;
 using OpcDaToUaGateway.Models;
+using OpcDaToUaGateway.Services.Interfaces;
 
 namespace OpcDaToUaGateway.Services
 {
     /// <summary>
-    /// 运行状态快照采集器 — H-36 新增。
-    /// 每 5 分钟自动采集进程健康指标写入 health/ 目录，保留最近 24 小时（288 个文件）。
-    /// PLAN 3.5: 每日凌晨 00:05 对昨日快照聚合，追加到 health_daily.jsonl；
-    /// 7天/30天 工作集增长率超阈值时触发 OnAlert 事件（黄色 20%、红色 50%）。
+    /// 健康快照采集器 — 定时采集进程内存/CPU/UA节点等指标，写入 JSON 文件。
+    /// 
+    /// 采集频率：每 5 分钟一次（由 MainForm 的 _healthTimer 触发）。
+    /// 存储路径：bin\Release\net472\health\snapshots_YYYY-MM-DD.jsonl
+    /// 每日聚合：每天凌晨 00:05 将前一天的快照聚合成 DailySummary，写入 health_daily.jsonl。
     /// </summary>
     public class HealthSnapshot : IHealthSnapshot
     {
-        private readonly GatewayManager _gateway;
         private readonly LogManager _log;
-        private readonly Timer _timer;
         private readonly string _healthDir;
         private readonly string _dailyFile;
+        private readonly List<DailySummary> _dailyCache = new List<DailySummary>();
         private readonly object _captureLock = new object();
 
-        private int _lastTotalUpdates;
         private int _disposedInt;
-
+        private string _lastAggregatedDate;
         private DateTime? _lastCaptureTime;
         private double? _lastWorkingSetMB;
-        private string _lastAggregatedDate;
+        private System.Diagnostics.Process _cachedProcess;
 
-        public event Action<string, int> OnAlert;
-
-        private readonly List<DailySummary> _dailyCache = new List<DailySummary>();
-
+        /// <summary>IHealthSnapshot 接口实现：最近一次成功采集的本地时间。</summary>
         public DateTime? LastCaptureTime => _lastCaptureTime;
+
+        /// <summary>IHealthSnapshot 接口实现：最近一次采集的工作集内存（MB）。</summary>
         public double? LastWorkingSetMB => _lastWorkingSetMB;
 
-        private const int SnapshotIntervalMinutes = 5;
-        private const int MaxSnapshots = 288;
-        private const int MaxDailyRetentionDays = 90;
-        private const double GrowthAlertWarning = 0.20;
-        private const double GrowthAlertCritical = 0.50;
+        /// <summary>内存增长率告警事件（severity: 0=正常 1=黄色 2=红色）。</summary>
+        public event Action<string, int> OnAlert;
 
-        public HealthSnapshot(GatewayManager gateway, LogManager log)
+        /// <summary>
+        /// 创建健康快照采集器。
+        /// </summary>
+        /// <param name="gatewayMgr">网关管理器（用于获取 DA 连接状态和更新计数）。</param>
+        /// <param name="log">日志管理器。</param>
+        public HealthSnapshot(GatewayManager gatewayMgr, LogManager log)
         {
-            _gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
-            _log = log ?? throw new ArgumentNullException(nameof(log));
-
+            _gatewayMgr = gatewayMgr;
+            _log = log;
             _healthDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "health");
-            if (!Directory.Exists(_healthDir))
-                Directory.CreateDirectory(_healthDir);
+            Directory.CreateDirectory(_healthDir);
             _dailyFile = Path.Combine(_healthDir, "health_daily.jsonl");
 
+            // 加载历史每日缓存
             LoadDailyCache();
-
-            _timer = new Timer(_ => Capture(), null, 1000, SnapshotIntervalMinutes * 60 * 1000);
-            _log.Append("[健康快照] 已启动，每 5 分钟采集一次");
         }
 
+        private readonly GatewayManager _gatewayMgr;
+
+        /// <summary>
+        /// 从 health_daily.jsonl 加载历史每日聚合数据到内存缓存。
+        /// </summary>
         private void LoadDailyCache()
         {
             try
             {
                 if (!File.Exists(_dailyFile)) return;
+
                 var lines = File.ReadAllLines(_dailyFile)
                     .Where(l => !string.IsNullOrWhiteSpace(l))
                     .Select(l => { try { return JsonConvert.DeserializeObject<DailySummary>(l); } catch { return null; } })
@@ -74,80 +75,64 @@ namespace OpcDaToUaGateway.Services
                     .ToList();
                 _dailyCache.AddRange(lines);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[健康快照] 加载缓存失败: " + ex.Message);
+            }
         }
 
+        /// <summary>
+        /// 定时采集进程内存/CPU/UA节点等指标。
+        /// </summary>
         private void Capture()
         {
             if (Volatile.Read(ref _disposedInt) == 1) return;
             if (!Monitor.TryEnter(_captureLock)) return;
+
             try
             {
+                // 进入 Monitor 后二次检查，防止 Dispose 在另一线程执行后访问已释放的 _gatewayMgr
+                if (Volatile.Read(ref _disposedInt) == 1) return;
+
                 var snapshot = new SnapshotData
                 {
-                    Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    TimestampUtc = DateTime.UtcNow.ToString("o"),
+                    TimestampUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
+                    DaConnected = false,
+                    TotalUpdates = 0,
+                    UaVariableCount = 0,
+                    WorkingSetMB = 0,
+                    PrivateMemoryMB = 0,
+                    GcTotalMemoryMB = 0,
+                    UpdateRatePerSec = 0,
+                    ErrorCount = 0
                 };
 
-                using (var proc = Process.GetCurrentProcess())
+                // 进程内存指标
+                try
                 {
-                    proc.Refresh();
-                    snapshot.WorkingSetMB = Math.Round(proc.WorkingSet64 / 1048576.0, 2);
-                    snapshot.PrivateMemoryMB = Math.Round(proc.PrivateMemorySize64 / 1048576.0, 2);
-                    snapshot.GcTotalMemoryMB = Math.Round(GC.GetTotalMemory(false) / 1048576.0, 2);
-                    snapshot.ThreadCount = proc.Threads.Count;
-                    snapshot.HandleCount = proc.HandleCount;
+                    var proc = System.Diagnostics.Process.GetCurrentProcess();
+                    snapshot.WorkingSetMB = proc.WorkingSet64 / (1024 * 1024);
+                    snapshot.PrivateMemoryMB = proc.PrivateMemorySize64 / (1024 * 1024);
+                    snapshot.GcTotalMemoryMB = GC.GetTotalMemory(false) / (1024 * 1024);
+                    _lastWorkingSetMB = snapshot.WorkingSetMB;
                 }
-
-                snapshot.IsRunning = _gateway.IsRunning;
-
-                if (_gateway.DaClient != null)
-                    snapshot.DaConnected = _gateway.DaClient.IsConnected;
-
-                if (_gateway.Bridge != null)
+                catch (Exception ex)
                 {
-                    var bridge = _gateway.Bridge;
-                    int currentTotal = bridge.TotalUpdates;
-                    snapshot.TotalUpdates = currentTotal;
-                    int delta = currentTotal - _lastTotalUpdates;
-                    snapshot.UpdateRatePerSec = Math.Round(delta / (SnapshotIntervalMinutes * 60.0), 1);
-                    _lastTotalUpdates = currentTotal;
-                    snapshot.ErrorCount = bridge.ErrorCount;
-                    snapshot.LastUpdateTime = bridge.LastUpdateTime.ToString("yyyy-MM-dd HH:mm:ss");
+                    System.Diagnostics.Debug.WriteLine("[健康快照] 获取进程内存失败: " + ex.Message);
                 }
-
-                if (_gateway.UaServer != null)
-                {
-                    snapshot.UaVariableCount = _gateway.UaServer.VariableCount;
-                    snapshot.UaNamespaceIndex = _gateway.UaServer.NamespaceIndex;
-                    snapshot.DaTagsChildren = _gateway.UaServer.DaTagsChildrenCount;
-                }
-
-                ThreadPool.GetAvailableThreads(out int workerAvail, out int ioAvail);
-                ThreadPool.GetMaxThreads(out int workerMax, out int ioMax);
-                snapshot.ThreadPoolWorkerBusy = workerMax - workerAvail;
-                snapshot.ThreadPoolWorkerMax = workerMax;
-
-                string fileName = $"health_{DateTime.Now:yyyyMMdd_HHmmss}.json";
-                string filePath = Path.Combine(_healthDir, fileName);
-                File.WriteAllText(filePath, JsonConvert.SerializeObject(snapshot, Formatting.Indented));
 
                 _lastCaptureTime = DateTime.Now;
-                _lastWorkingSetMB = snapshot.WorkingSetMB;
+
+                // 写入当日快照文件
+                string today = DateTime.Now.ToString("yyyy-MM-dd");
+                string snapshotFile = Path.Combine(_healthDir, $"snapshots_{today}.jsonl");
+                File.AppendAllText(snapshotFile, JsonConvert.SerializeObject(snapshot) + Environment.NewLine);
 
                 RotateOldSnapshots();
-
-                DateTime now = DateTime.Now;
-                if (now.Hour == 0 && now.Minute >= 5 && now.Minute < 10)
-                {
-                    string yesterday = now.Date.AddDays(-1).ToString("yyyy-MM-dd");
-                    if (yesterday != _lastAggregatedDate)
-                        AppendDailySummary(yesterday);
-                }
             }
             catch (Exception ex)
             {
-                try { _log?.Append($"[健康快照] 采集失败: {ex.Message}"); } catch { }
+                try { _log?.Append("[健康快照] 采集失败: " + ex.Message); } catch { }
             }
             finally
             {
@@ -155,33 +140,46 @@ namespace OpcDaToUaGateway.Services
             }
         }
 
+        /// <summary>
+        /// 清理超过 30 天的旧快照文件。
+        /// </summary>
         private void RotateOldSnapshots()
         {
             try
             {
-                var files = Directory.GetFiles(_healthDir, "health_*.json");
-                if (files.Length <= MaxSnapshots) return;
+                string today = DateTime.Now.ToString("yyyy-MM-dd");
+                var toDelete = new List<string>();
 
-                Array.Sort(files, (a, b) =>
+                foreach (string f in Directory.GetFiles(_healthDir, "snapshots_*.jsonl"))
                 {
-                    var fa = new FileInfo(a);
-                    var fb = new FileInfo(b);
-                    return fa.CreationTime.CompareTo(fb.CreationTime);
-                });
+                    try
+                    {
+                        string datePart = Path.GetFileName(f).Replace("snapshots_", "").Replace(".jsonl", "");
+                        if (datePart != today && DateTime.TryParse(datePart, out DateTime fileDate) && fileDate < DateTime.Now.AddDays(-30))
+                            toDelete.Add(f);
+                    }
+                    catch { }
+                }
 
-                int toDelete = files.Length - MaxSnapshots;
-                for (int i = 0; i < toDelete; i++)
-                    try { File.Delete(files[i]); } catch { }
+                foreach (string f in toDelete)
+                    try { File.Delete(f); } catch (Exception ex) { System.Diagnostics.Debug.WriteLine("[健康快照] 删除旧快照失败: " + ex.Message); }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[健康快照] 旋转快照失败: " + ex.Message);
+            }
         }
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposedInt, 1) == 1) return;
-            try { _timer?.Dispose(); } catch { }
+            if (_cachedProcess != null) { _cachedProcess.Dispose(); _cachedProcess = null; }
+
         }
 
+        /// <summary>
+        /// 手动触发一次"昨日"日聚合。
+        /// </summary>
         public DailySummary GenerateDailySummary()
         {
             if (!Monitor.TryEnter(_captureLock)) return null;
@@ -192,7 +190,7 @@ namespace OpcDaToUaGateway.Services
             }
             catch (Exception ex)
             {
-                try { _log?.Append($"[健康快照] 手动聚合失败: {ex.Message}"); } catch { }
+                _log?.Append("[健康快照] 手动聚合失败: " + ex.Message);
                 return null;
             }
             finally
@@ -205,91 +203,99 @@ namespace OpcDaToUaGateway.Services
         {
             if (targetDate == _lastAggregatedDate) return null;
 
-            string prefix = "health_" + targetDate.Replace("-", "");
-            var files = Directory.GetFiles(_healthDir, prefix + "*.json");
-            if (files.Length == 0)
-            {
-                _log?.Append($"[健康快照] 聚合日期 {targetDate} 无快照数据，跳过");
-                return null;
-            }
+            string sourceFile = Path.Combine(_healthDir, $"snapshots_{targetDate}.jsonl");
+            if (!File.Exists(sourceFile)) return null;
 
             var dataPoints = new List<SnapshotData>();
-            foreach (var f in files)
+            foreach (string f in File.ReadAllLines(sourceFile))
             {
                 try
                 {
-                    var d = JsonConvert.DeserializeObject<SnapshotData>(File.ReadAllText(f));
+                    var d = JsonConvert.DeserializeObject<SnapshotData>(f);
                     if (d != null) dataPoints.Add(d);
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[健康快照] 读取快照失败: " + ex.Message);
+                }
             }
+
             if (dataPoints.Count == 0) return null;
 
             // Count DA disconnects (status flips)
-            int disconnects = 0;
-            bool? prevConnected = null;
-            foreach (var d in dataPoints.OrderBy(x => x.Timestamp))
+            int daDisconnects = 0;
+            bool? prevDaConnected = null;
+            foreach (var dp in dataPoints)
             {
-                if (prevConnected.HasValue && d.DaConnected != prevConnected.Value)
-                    disconnects++;
-                prevConnected = d.DaConnected;
+                if (prevDaConnected.HasValue && prevDaConnected.Value != dp.DaConnected)
+                    daDisconnects++;
+                prevDaConnected = dp.DaConnected;
             }
 
-            var sum = new DailySummary
+            var summary = new DailySummary
             {
                 Date = targetDate,
                 SampleCount = dataPoints.Count,
-                WorkingSetAvgMB = Math.Round(dataPoints.Average(x => x.WorkingSetMB), 2),
-                WorkingSetMaxMB = Math.Round(dataPoints.Max(x => x.WorkingSetMB), 2),
-                WorkingSetMinMB = Math.Round(dataPoints.Min(x => x.WorkingSetMB), 2),
-                PrivateMemoryAvgMB = Math.Round(dataPoints.Average(x => x.PrivateMemoryMB), 2),
-                GcTotalMemoryAvgMB = Math.Round(dataPoints.Average(x => x.GcTotalMemoryMB), 2),
-                UpdateRateAvgPerSec = Math.Round(dataPoints.Average(x => x.UpdateRatePerSec), 2),
-                TotalUpdatesEndOfDay = dataPoints.Max(x => x.TotalUpdates),
-                ErrorCountEndOfDay = dataPoints.Max(x => x.ErrorCount),
-                DaDisconnectedCount = disconnects,
+                WorkingSetAvgMB = Math.Round(dataPoints.Average(d => d.WorkingSetMB), 1),
+                WorkingSetMinMB = Math.Round(dataPoints.Min(d => d.WorkingSetMB), 1),
+                WorkingSetMaxMB = Math.Round(dataPoints.Max(d => d.WorkingSetMB), 1),
+                PrivateMemoryAvgMB = Math.Round(dataPoints.Average(d => d.PrivateMemoryMB), 1),
+                GcTotalMemoryAvgMB = Math.Round(dataPoints.Average(d => d.GcTotalMemoryMB), 1),
+                UpdateRateAvgPerSec = Math.Round(dataPoints.Average(d => d.UpdateRatePerSec), 1),
+                TotalUpdatesEndOfDay = dataPoints[dataPoints.Count - 1].TotalUpdates,
+                ErrorCountEndOfDay = dataPoints[dataPoints.Count - 1].ErrorCount,
+                DaDisconnectedCount = daDisconnects,
+                GrowthRate = CalculateGrowthRate(targetDate)
             };
 
-            // Compute growth rate from history
-            if (_dailyCache.Count > 0)
+            // 内存增长率告警
+            if (summary.GrowthRate > 0.2)
             {
-                var history = _dailyCache.Where(x => x.Date != sum.Date).ToList();
-                if (history.Count >= 7)
-                {
-                    double last7 = history.Skip(Math.Max(0, history.Count - 7)).Average(x => x.WorkingSetAvgMB);
-                    double last30 = history.Skip(Math.Max(0, history.Count - 30)).Average(x => x.WorkingSetAvgMB);
-                    if (last30 > 0.1)
-                    {
-                        double rate = (last7 - last30) / last30;
-                        sum.GrowthRate = Math.Round(rate, 4);
-                        sum.GrowthAlert = rate >= GrowthAlertCritical ? "critical"
-                                       : rate >= GrowthAlertWarning ? "warning" : "none";
-                    }
-                }
+                OnAlert?.Invoke($"内存持续增长: {summary.GrowthRate:P1}", 2);
+            }
+            else if (summary.GrowthRate > 0.1)
+            {
+                OnAlert?.Invoke($"内存缓慢增长: {summary.GrowthRate:P1}", 1);
             }
 
-            File.AppendAllText(_dailyFile, JsonConvert.SerializeObject(sum) + Environment.NewLine);
-
-            _dailyCache.Add(sum);
-            if (_dailyCache.Count > MaxDailyRetentionDays)
-                _dailyCache.RemoveRange(0, _dailyCache.Count - MaxDailyRetentionDays);
-
+            // 追加到每日聚合文件
             try
             {
-                File.WriteAllLines(_dailyFile, _dailyCache.Select(x => JsonConvert.SerializeObject(x)));
+                File.AppendAllText(_dailyFile, JsonConvert.SerializeObject(summary) + Environment.NewLine);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine("[健康快照] 保存每日缓存失败: " + ex.Message);
+            }
 
             _lastAggregatedDate = targetDate;
-            _log?.Append($"[健康快照] 已聚合 {targetDate}（{dataPoints.Count} 个样本，平均工作集 {sum.WorkingSetAvgMB:F1}MB，告警={sum.GrowthAlert}）");
+            _log?.Append($"[健康快照] 已聚合 {targetDate}（{dataPoints.Count} 个样本，平均工作集 {summary.WorkingSetAvgMB:F1}MB，告警={summary.GrowthAlert}）");
 
-            int severity = sum.GrowthAlert == "critical" ? 2 : (sum.GrowthAlert == "warning" ? 1 : 0);
-            if (severity > 0)
-                OnAlert?.Invoke(
-                    $"内存增长率告警：{targetDate} 7天均值 {sum.WorkingSetAvgMB:F1}MB 较30天增长 {(sum.GrowthRate * 100):F1}%",
-                    severity);
+            return summary;
+        }
 
-            return sum;
+        private double CalculateGrowthRate(string targetDate)
+        {
+            // 计算过去 7 天与过去 30 天的内存增长率
+            try
+            {
+                DateTime cutoff7 = DateTime.Now.AddDays(-7);
+                DateTime cutoff30 = DateTime.Now.AddDays(-30);
+                var recent = _dailyCache.Where(d => DateTime.TryParse(d.Date, out DateTime dt) && dt >= cutoff7).ToList();
+                var older = _dailyCache.Where(d => DateTime.TryParse(d.Date, out DateTime dt) && dt >= cutoff30 && dt < cutoff7).ToList();
+
+                if (recent.Count == 0 || older.Count == 0) return 0;
+
+                double recentAvg = recent.Average(d => d.WorkingSetAvgMB);
+                double olderAvg = older.Average(d => d.WorkingSetAvgMB);
+
+                if (olderAvg <= 0) return 0;
+                return (recentAvg - olderAvg) / olderAvg;
+            }
+            catch
+            {
+                return 0;
+            }
         }
     }
 }

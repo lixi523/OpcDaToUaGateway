@@ -362,8 +362,7 @@ namespace OpcDaToUaGateway.Watchdog
                                 {
                                     FileName = mainExePath,
                                     WorkingDirectory = Path.GetDirectoryName(mainExePath),
-                                    // UseShellExecute=true 以支持以正常窗口方式启动，
-                                    // 且不需要看门狗拥有额外的权限。
+                                    Arguments = "--minimized", // I-08 修复：与开机启动快捷方式保持一致，最小化到托盘
                                     UseShellExecute = true
                                 };
                                 // Process.Start 返回的 Process 对象持有 OS 句柄，

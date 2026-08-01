@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -55,8 +56,8 @@ namespace OpcDaToUaGateway.Services
                     else
                         UpdateTextBox(uiLine);
                 }
-                catch (ObjectDisposedException) { }
-                catch (InvalidOperationException) { }
+catch (ObjectDisposedException) { /* Form已释放，忽略 */ }
+catch (InvalidOperationException) { /* 控件已销毁，忽略 */ }
             }
 
             try
@@ -73,11 +74,11 @@ namespace OpcDaToUaGateway.Services
                             File.AppendAllText(warnPath,
                                 $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 日志队列已满，累计丢弃 {dropped} 条\r\n");
                         }
-                        catch { }
+catch (Exception ex) { Debug.WriteLine($"[Log] 写入失败: {ex.Message}"); }
                     }
                 }
             }
-            catch (InvalidOperationException) { }
+catch (InvalidOperationException) { /* TextBox已销毁，忽略 */ }
         }
 
         public void CleanupOldFiles()
@@ -95,8 +96,8 @@ namespace OpcDaToUaGateway.Services
             if (!_writerThread.Join(TimeSpan.FromSeconds(5)))
                 System.Diagnostics.Debug.WriteLine("[LogManager] 警告: 写入线程在 5 秒内未结束");
 
-            try { _fileWriter?.Flush(); } catch { }
-            try { _fileWriter?.Dispose(); } catch { }
+try { _fileWriter?.Flush(); } catch (Exception ex) { Debug.WriteLine($"[Log] Flush失败: {ex.Message}"); }
+try { _fileWriter?.Dispose(); } catch (Exception ex) { Debug.WriteLine($"[Log] Dispose失败: {ex.Message}"); }
             _fileWriter = null;
             _queue.Dispose();
         }
@@ -129,6 +130,9 @@ namespace OpcDaToUaGateway.Services
                             _currentDate = today;
                         }
 
+                        // 写入前检查 _fileWriter 是否为 null
+                        // 防止 WriterLoop IO 异常重启失败后 _fileWriter 为 null 导致 NRE
+                        if (_fileWriter == null) continue;
                         _fileWriter.WriteLine(line);
 
                         if (++writeCount % 10 == 0)
@@ -147,7 +151,10 @@ namespace OpcDaToUaGateway.Services
                             _fileWriter?.Flush();
                             _fileWriter?.Dispose();
                         }
-                        catch { }
+                        catch (Exception ex2)
+                        {
+                            Debug.WriteLine($"[Log] 文件日志刷新/释放失败: {ex2.Message}");
+                        }
                         _fileWriter = null;
 
                         try
@@ -156,19 +163,28 @@ namespace OpcDaToUaGateway.Services
                             _fileWriter = new StreamWriter(logFile, true, new UTF8Encoding(true));
                             _fileWriter.AutoFlush = false;
                         }
-                        catch
+                        catch (Exception ex2)
                         {
-                            System.Diagnostics.Debug.WriteLine($"[LogManager] 无法重建日志文件: {line}");
+                            Debug.WriteLine($"[LogManager] 无法重新打开日志文件: {ex2.Message}，日志将降级到 Debug 输出");
+                            // 文件重建失败时不要丢失日志，降级写入 Debug.WriteLine
+                            Debug.WriteLine(line);
                         }
                     }
                     catch (NullReferenceException)
                     {
-                        System.Diagnostics.Debug.WriteLine($"[LogManager] 文件写入器为null，日志丢弃: {line}");
+                        // 预期内：_fileWriter 为 null 时 WriteLine 会抛 NRE
+                        // 上面 IOException 块已处理重建，忽略此异常
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[Log] 日志写入未知错误: {ex.Message}");
+                    }
                 }
             }
-            catch (InvalidOperationException) { }
+            catch (InvalidOperationException ex)
+            {
+                Debug.WriteLine($"[Log] WriterLoop 异常: {ex.Message}");
+            }
         }
 
         private void DoCleanup()
@@ -186,10 +202,10 @@ namespace OpcDaToUaGateway.Services
                         if (fi.LastWriteTime < cutoff)
                             fi.Delete();
                     }
-                    catch { }
+catch (Exception ex) { Debug.WriteLine($"[Log] 日志旋转失败: {ex.Message}"); }
                 }
             }
-            catch { }
+catch (Exception ex) { Debug.WriteLine($"[Log] 日志清理失败: {ex.Message}"); }
         }
     }
 }

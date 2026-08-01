@@ -174,6 +174,12 @@ namespace OpcDaToUaGateway.Models
         /// P5 修复：默认初始化为空列表而非 null，避免在序列化、UI 绑定和遍历时的各处空值检查。
         /// </summary>
         public List<TagConfig> Tags { get; set; } = new List<TagConfig>();
+
+        /// <summary>
+        /// DA 连接断开后的最大自动重连次数（默认 50，非正数时使用默认值）。
+        /// M6 修复：从 GatewayManager 硬编码移至配置项，允许不同部署环境自定义。
+        /// </summary>
+        public int MaxReconnectAttempts { get; set; }
     }
 
     /// <summary>

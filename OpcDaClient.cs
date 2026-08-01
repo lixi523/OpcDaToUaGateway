@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using TitaniumAS.Opc.Client;
@@ -12,10 +13,59 @@ using OpcDaToUaGateway.Services.Interfaces;
 
 namespace OpcDaToUaGateway
 {
+    internal sealed class OpcDaClientLifecycleState
+    {
+        private readonly ManualResetEventSlim _readCompleted = new ManualResetEventSlim(true);
+        private int _readsEnabled;
+        private int _readInProgress;
+        private int _acquisitionMode = (int)DaAcquisitionMode.Async;
+
+        internal DaAcquisitionMode AcquisitionMode => (DaAcquisitionMode)Volatile.Read(ref _acquisitionMode);
+
+        internal void RecordAcquisitionMode(DaAcquisitionMode mode)
+            => Volatile.Write(ref _acquisitionMode, (int)mode);
+
+        internal void EnableReads()
+            => Volatile.Write(ref _readsEnabled, 1);
+
+        internal bool TryEnterRead()
+        {
+            if (Volatile.Read(ref _readsEnabled) == 0 ||
+                Interlocked.CompareExchange(ref _readInProgress, 1, 0) != 0)
+                return false;
+
+            _readCompleted.Reset();
+            if (Volatile.Read(ref _readsEnabled) != 0)
+                return true;
+
+            ExitRead();
+            return false;
+        }
+
+        internal void ExitRead()
+        {
+            Volatile.Write(ref _readInProgress, 0);
+            _readCompleted.Set();
+        }
+
+        internal bool StopReadsAndWait(TimeSpan timeout)
+        {
+            Volatile.Write(ref _readsEnabled, 0);
+            var stopwatch = Stopwatch.StartNew();
+            while (Volatile.Read(ref _readInProgress) != 0)
+            {
+                TimeSpan remaining = timeout - stopwatch.Elapsed;
+                if (remaining <= TimeSpan.Zero || !_readCompleted.Wait(remaining))
+                    return Volatile.Read(ref _readInProgress) == 0;
+            }
+            return true;
+        }
+    }
+
     /// <summary>
     /// OPC DA 客户端封装，负责与 OPC DA 服务器建立 COM 连接、创建订阅并接收异步数据回调。
     /// 
-    /// H-26（2026-06-23）：从 Technosoftware DaAeHdaClient（商业库，30 天试用到期）
+    /// 迁移说明（2026-06-23）：从 Technosoftware DaAeHdaClient（商业库，30 天试用到期）
     /// 迁移至 TitaniumAS.Opc.Client（MIT 开源免费库）。
     /// 
     /// API 映射对照表：
@@ -62,6 +112,8 @@ namespace OpcDaToUaGateway
             new ConcurrentDictionary<string, List<string>>();
 
         private Timer _readTimer;
+        private readonly OpcDaClientLifecycleState _lifecycleState = new OpcDaClientLifecycleState();
+        private static readonly TimeSpan ReadShutdownTimeout = TimeSpan.FromSeconds(10);
 
         // 生命周期锁 + 原子 Disposed 守护
         private readonly object _lifecycleLock = new object();
@@ -92,11 +144,11 @@ namespace OpcDaToUaGateway
         /// <param name="serverProgId">DA 服务器的 ProgId（例如 "Matrikon.OPC.Simulation.1"）。</param>
         /// <param name="tags">需要订阅的标签配置列表。</param>
         /// <param name="host">DA 服务器所在主机名，默认 "localhost" 表示本机。</param>
-        public OpcDaClient(string serverProgId, List<TagConfig> tags, string host = "localhost")
+        public OpcDaClient(string serverProgId, List<TagConfig> tags, string host = AppConstants.DefaultDaHost)
         {
             _serverProgId = serverProgId ?? throw new ArgumentNullException(nameof(serverProgId));
             _tags = tags ?? throw new ArgumentNullException(nameof(tags));
-            _host = string.IsNullOrWhiteSpace(host) ? "localhost" : host;
+            _host = string.IsNullOrWhiteSpace(host) ? AppConstants.DefaultDaHost : host;
         }
 
         /// <summary>
@@ -114,6 +166,8 @@ namespace OpcDaToUaGateway
         {
             try
             {
+                _lifecycleState.RecordAcquisitionMode(mode);
+                _lifecycleState.EnableReads();
                 OnStatusChanged?.Invoke("正在创建 OPC DA 客户端 (TitaniumAS)...");
 
                 var uri = UrlBuilder.Build(_serverProgId, _host);
@@ -291,6 +345,10 @@ namespace OpcDaToUaGateway
         /// </summary>
         private void OnValuesChanged(object sender, OpcDaItemValuesChangedEventArgs args)
         {
+            // 检查 _disposedInt，防止 Dispose() 后在另一线程释放的
+            // _group/_itemIdToTagKeys 被此回调访问，导致 ObjectDisposedException
+            if (Volatile.Read(ref _disposedInt) == 1) return;
+
             foreach (OpcDaItemValue value in args.Values)
             {
                 try
@@ -332,11 +390,25 @@ namespace OpcDaToUaGateway
         /// </summary>
         private void DoSyncRead()
         {
+            if (!_lifecycleState.TryEnterRead()) return;
+
+            try
+            {
+                DoSyncReadCore();
+            }
+            finally
+            {
+                _lifecycleState.ExitRead();
+            }
+        }
+
+        private void DoSyncReadCore()
+        {
             OpcDaGroup group;
             ConcurrentDictionary<string, OpcDaItem> tagKeyToItem;
             bool connected;
 
-            // H-30 修复：检查 _disposedInt，防止 Cleanup() 释放资源后仍在执行的定时器回调
+            // 检查 _disposedInt，防止 Cleanup() 释放资源后仍在执行的定时器回调
             //       访问已 Dispose 的 _group/_server，导致 ObjectDisposedException 或竞态崩溃。
             if (Volatile.Read(ref _disposedInt) == 1) return;
 
@@ -376,7 +448,7 @@ namespace OpcDaToUaGateway
                                 OnDataChanged?.Invoke(tagKey, value.Value, isGood, timestamp);
                         }
                     }
-                    catch { }
+catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 数据回调异常: {ex.Message}"); }
                 }
             }
             catch (Exception ex)
@@ -397,40 +469,61 @@ namespace OpcDaToUaGateway
         /// </summary>
         private void Cleanup()
         {
-            if (Interlocked.Exchange(ref _disposedInt, 1) == 1) return;
+            if (Volatile.Read(ref _disposedInt) == 1) return;
 
             try
             {
                 StopReadTimer();
-
-                if (_group != null)
+                if (!_lifecycleState.StopReadsAndWait(ReadShutdownTimeout))
                 {
-                    try { _group.ValuesChanged -= OnValuesChanged; } catch { }
-                    try { _group.IsSubscribed = false; } catch { }
-                    try { _server?.RemoveGroup(_group); } catch { }
-                    try { ((IDisposable)_group).Dispose(); } catch { }
-                    _group = null;
+                    _isConnected = false;
+                    Interlocked.Exchange(ref _disposedInt, 1);
+                    OnStatusChanged?.Invoke("[DA] 等待在途同步读取结束超时，读取结束后将延迟释放 COM 资源");
+                    ThreadPool.QueueUserWorkItem(_ =>
+                    {
+                        _lifecycleState.StopReadsAndWait(TimeSpan.FromMilliseconds(int.MaxValue));
+                        lock (_lifecycleLock)
+                        {
+                            ReleaseComResources();
+                        }
+                    });
+                    return;
                 }
 
-                if (_server != null)
-                {
-                    try { _server.Dispose(); } catch { }
-                    _server = null;
-                }
-
-                lock (_dictLock)
-                {
-                    _tagKeyToItem.Clear();
-                    _itemIdToTagKeys.Clear();
-                }
-
-                _isConnected = false;
+                Interlocked.Exchange(ref _disposedInt, 1);
+                ReleaseComResources();
             }
             catch (Exception ex)
             {
                 OnStatusChanged?.Invoke($"清理 OPC DA 资源时出错: {ex.Message}");
             }
 
+        }
+
+        private void ReleaseComResources()
+        {
+            if (_group != null)
+            {
+                try { _group.ValuesChanged -= OnValuesChanged; } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 移除 ValuesChanged 回调失败: {ex.Message}"); }
+                try { _group.IsSubscribed = false; } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 取消订阅失败: {ex.Message}"); }
+                try { _server?.RemoveGroup(_group); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 移除组失败: {ex.Message}"); }
+                try { ((IDisposable)_group).Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 释放组失败: {ex.Message}"); }
+                _group = null;
+            }
+
+            if (_server != null)
+            {
+                try { _server.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 释放服务器失败: {ex.Message}"); }
+                _server = null;
+            }
+
+            lock (_dictLock)
+            {
+                _tagKeyToItem.Clear();
+                _itemIdToTagKeys.Clear();
+            }
+
+            _isConnected = false;
             OnStatusChanged?.Invoke("OPC DA 已断开");
         }
 
@@ -438,7 +531,7 @@ namespace OpcDaToUaGateway
         {
             if (_readTimer != null)
             {
-                try { _readTimer.Dispose(); } catch { }
+try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 释放读取定时器失败: {ex.Message}"); }
                 _readTimer = null;
             }
         }
@@ -457,21 +550,54 @@ namespace OpcDaToUaGateway
         {
             lock (_lifecycleLock)
             {
-                // V1.9.0 修复：在重连前检查 _disposedInt，防止 Dispose 后仍在排队的回调
+                // 在重连前检查 _disposedInt，防止 Dispose 后仍在排队的回调
                 //       访问已释放的 _group/_server，导致 ObjectDisposedException 或竞态崩溃。
                 if (Volatile.Read(ref _disposedInt) == 1) return false;
 
                 try
                 {
                     OnStatusChanged?.Invoke("[看门狗] 正在尝试重新连接 OPC DA...");
-                    Cleanup();
+                    // 不再调用 Cleanup()（它会设置 _disposedInt=1），
+                    // 改为直接释放资源但保留 _disposedInt 为 0，避免 TryReconnect 中
+                    // 重置 _disposedInt 导致的竞态窗口。
+                    StopReadTimer();
+                    if (!_lifecycleState.StopReadsAndWait(ReadShutdownTimeout))
+                    {
+                        _isConnected = false;
+                        OnStatusChanged?.Invoke("[看门狗] 等待在途同步读取结束超时，本次重连已取消");
+                        return false;
+                    }
+                    if (_group != null)
+                    {
+                        try { _group.ValuesChanged -= OnValuesChanged; } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 移除 ValuesChanged 回调失败: {ex.Message}"); }
+                        try { _group.IsSubscribed = false; } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 取消订阅失败: {ex.Message}"); }
+                        try { _server?.RemoveGroup(_group); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 移除组失败: {ex.Message}"); }
+                        try { ((IDisposable)_group).Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 释放组失败: {ex.Message}"); }
+                        _group = null;
+                    }
+                    if (_server != null)
+                    {
+                        try { _server.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 释放服务器失败: {ex.Message}"); }
+                        _server = null;
+                    }
+                    lock (_dictLock)
+                    {
+                        _tagKeyToItem.Clear();
+                        _itemIdToTagKeys.Clear();
+                    }
+                    _isConnected = false;
+
+                    // 重新初始化 _disposedInt 为 0（确保 Start 中不会误判为已释放）
+                    // 注意：此时 _lifecycleLock 已持有，Dispose 无法进入，安全
                     Interlocked.Exchange(ref _disposedInt, 0);
-                    Start(updateRateMs);
+                    Start(updateRateMs, _lifecycleState.AcquisitionMode);
                     OnStatusChanged?.Invoke("[看门狗] OPC DA 重连成功");
                     return true;
                 }
                 catch (Exception ex)
                 {
+                    Interlocked.Exchange(ref _disposedInt, 0);
+                    _isConnected = false;
                     OnStatusChanged?.Invoke($"[看门狗] OPC DA 重连失败: {ex.Message}");
                     return false;
                 }
@@ -485,14 +611,14 @@ namespace OpcDaToUaGateway
         /// <summary>浏览地址空间时的最大递归深度。</summary>
         public const int MaxBrowseDepth = 10;
 
-        // R-6 修复：AppConstants.DaMaxBrowseItems/AppConstants.DaAddItemBatchSize/AppConstants.DaSyncIntervalMs 迁移至 AppConstants，统一调优入口
+        // AppConstants.DaMaxBrowseItems/AppConstants.DaAddItemBatchSize/AppConstants.DaSyncIntervalMs 迁移至 AppConstants，统一调优入口
 
         /// <summary>
         /// 浏览 OPC DA 服务器的所有叶子点位（支持远程服务器）。
         /// 使用递归深度优先遍历，最大深度 MaxBrowseDepth 层，
         /// 最多返回 AppConstants.DaMaxBrowseItems 个点位以防止内存溢出。
         /// 
-        /// H-26 迁移：使用 OpcDaBrowserAuto.GetElements() 替代
+        /// 使用 OpcDaBrowserAuto.GetElements() 替代
         /// Technosoftware 的 server.Browse() + BrowseNext() 分页模式。
         /// TitaniumAS 没有显式分页 API —— GetElements() 一次性返回当前层级
         /// 全部子元素，其内部通过 OPC DA 3.0 的 dwMaxElementsReturned 控制单次数量。
@@ -500,7 +626,7 @@ namespace OpcDaToUaGateway
         public static List<OpcDaItemInfo> BrowseAllItems(
             string serverProgId, string host = "localhost", Action<string> logger = null)
         {
-            if (string.IsNullOrWhiteSpace(host)) host = "localhost";
+            if (string.IsNullOrWhiteSpace(host)) host = AppConstants.DefaultDaHost;
 
             void Log(string message)
             {
@@ -536,7 +662,7 @@ namespace OpcDaToUaGateway
                         Log($"[Browse]   1. OPC DA 服务器是否正常运行且有已配置的标签");
                         Log($"[Browse]   2. 服务器地址空间结构是否为分支嵌套（非扁平根节点）");
                         Log($"[Browse]   3. 可使用 OPC 客户端工具（如 Matrikon OPC Explorer）验证");
-                    }                    // V1.9.1: 通过临时 Group 获取真实数据类型
+                    }                    // 通过临时 Group 获取真实数据类型
                     FillRealDataTypes(server, browser, items, Log);
 
                     return items;
@@ -793,26 +919,26 @@ namespace OpcDaToUaGateway
             {
                 var itemProps = element.ItemProperties;
                 if (itemProps?.Properties == null)
-                    return "Variant";
+                    return AppConstants.UnknownDataType;
 
                 foreach (var prop in itemProps.Properties)
                 {
                     if (prop.DataType != null)
                     {
                         string typeName = prop.DataType.Name;
-                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object" && typeName != "String")
+                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object")
                             return MapBclToDataType(typeName);
                     }
                     if (prop.Value != null)
                     {
                         string typeName = prop.Value.GetType().Name;
-                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object" && typeName != "String")
+                        if (!string.IsNullOrEmpty(typeName) && typeName != "Object")
                             return MapBclToDataType(typeName);
                     }
                 }
             }
-            catch { }
-            return "Variant";
+            catch (Exception ex) { OpcServerScanner.Log($"[DA] 同步读取失败: {ex.Message}"); }
+            return AppConstants.UnknownDataType;
         }
 
         /// <summary>
@@ -840,7 +966,7 @@ namespace OpcDaToUaGateway
             }
         }
         /// <summary>
-        /// V1.9.1: 通过临时 Group 获取真实数据类型 — 创建不激活的 OPC DA Group 让服务器返回 CanonicalDataType。
+        /// 通过临时 Group 获取真实数据类型 — 创建不激活的 OPC DA Group 让服务器返回 CanonicalDataType。
         /// </summary>
         private static void FillRealDataTypes(OpcDaServer server, OpcDaBrowserAuto browser, List<OpcDaItemInfo> items, Action<string> logger)
         {
@@ -849,7 +975,7 @@ namespace OpcDaToUaGateway
             OpcDaGroup tempGroup = null;
             try
             {
-                var groupState = new OpcDaGroupState { IsActive = false, ClientHandle = 0 };
+                var groupState = new OpcDaGroupState { IsActive = false, ClientHandle = 0, UpdateRate = TimeSpan.FromMilliseconds(1000) };
                 tempGroup = server.AddGroup("_TempBrowseGroup", groupState);
                 logger($"[DataType] 创建临时浏览 Group，准备填充 {items.Count} 个点位的数据类型");
 
@@ -875,7 +1001,7 @@ namespace OpcDaToUaGateway
                             if (dt != null)
                             {
                                 string tn = dt.Name;
-                                if (!string.IsNullOrEmpty(tn) && tn != "Object" && tn != "String")
+                                if (!string.IsNullOrEmpty(tn) && tn != "Object")
                                     itemInfo.DataTypeName = MapBclToDataType(tn);
                             }
                         }
@@ -894,7 +1020,8 @@ namespace OpcDaToUaGateway
             {
                 if (tempGroup != null)
                 {
-                    try { tempGroup.RemoveItems(tempGroup.Items); ((System.IDisposable)tempGroup).Dispose(); } catch { }
+                    try { tempGroup.RemoveItems(tempGroup.Items); } catch (Exception ex) { logger?.Invoke($"[DataType] 移除临时组项目失败: {ex.Message}"); }
+                    try { ((System.IDisposable)tempGroup).Dispose(); } catch (Exception ex) { logger?.Invoke($"[DataType] 释放临时组失败: {ex.Message}"); }
                 }
             }
         }

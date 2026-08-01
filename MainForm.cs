@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -44,19 +44,19 @@ namespace OpcDaToUaGateway
         private Label _lblStats;
         private Label _lblWatchdogStatus;
         private DataGridView _dgvTags;
-        private List<TagConfig> _gridTags; // 虚拟模式下的标签数据源
-        private IReadOnlyList<TagSnapshot> _cachedSnapshots; // 缓存的快照引用，避免每次 CellValueNeeded 都重建（接口 IDataBridge.GetSnapshots 返回类型）
+        private IReadOnlyList<TagSnapshot> _cachedSnapshots; // 缓存的快照引用，避免重复读取（接口 IDataBridge.GetSnapshots 返回类型）
         private TextBox _txtLog;
         private Timer _refreshTimer;
 
         /// <summary>P1-4: 自适应刷新 — 缓存上次快照的特征哈希，无变化时降低刷新频率</summary>
         private int _lastSnapshotHash;
         private Timer _healthTimer;
-        private Timer _autoStartTimer;  // P2 修复：存为字段以便 Dispose
+        private Timer _autoStartTimer;  // 存为字段以便 Dispose
 
         // ---- 管理器 ----
         private LogManager _log;
         private ConfigManager _configMgr;
+        private AutoStartManager _autoStartMgr;
         private WatchdogManager _watchdogMgr;
         private GatewayManager _gatewayMgr;
         private IHealthSnapshot _healthSnapshot;
@@ -70,8 +70,9 @@ namespace OpcDaToUaGateway
         private readonly bool _startMinimized;
         private bool _forceClose;
         private bool _isShuttingDown;
-        private volatile bool _closeInProgress; // M3 修复：防止 async void 重入
-        private bool _isShuttingDone; // C-15 修复：标记异步关闭已完成，允许第二次 Close 执行资源释放
+        // 合并 _closeInProgress、_isShuttingDone 为单一标志
+        // _isShuttingDown 表示关闭流程已启动
+        // _forceClose 表示第二次 Close 调用应执行资源释放
 
         /// <summary>当前配置（便捷属性，代理到 ConfigManager）</summary>
         private AppConfig Config => _configMgr?.Config;
@@ -92,13 +93,17 @@ namespace OpcDaToUaGateway
 
         private void BuildUI()
         {
+            // 窗体初始化
             Text = WindowTitle;
             Size = new Size(960, 900);
             StartPosition = FormStartPosition.CenterScreen;
+            MaximizeBox = false;
+            MaximumSize = new Size(0, 0);
             MinimumSize = new Size(800, 720);
             Font = new Font("Microsoft YaHei UI", 9f);
             BackColor = Theme.FormBg;
 
+            // 加载图标
             string iconPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
             if (System.IO.File.Exists(iconPath))
             {
@@ -107,8 +112,17 @@ namespace OpcDaToUaGateway
             }
 
             int y = 10;
-
-            // ---- 区域 1：OPC DA 服务器选择 ----
+            y = BuildDaServerSection(y);
+            y = BuildUaServerSection(y);
+            y = BuildControlPanelSection(y);
+            y = BuildTagMonitorSection(y);
+            BuildLogSection(y);
+            InitializeManagers();
+            BuildTrayIcon();
+            SetupEventHandlersAndAutoStart();
+        }
+        private int BuildDaServerSection(int y)
+        {
             var grpServer = new GroupBox
             {
                 Text = "OPC DA 服务器设置",
@@ -135,23 +149,21 @@ namespace OpcDaToUaGateway
             {
                 Text = "获取点位...", Location = new Point(110, 65), Size = new Size(110, 30),
                 FlatStyle = FlatStyle.Flat, BackColor = Theme.Primary, ForeColor = Color.White,
-                Cursor = Cursors.Hand, Enabled = false  // V1.9.0: 未选择服务器时禁用
+                Cursor = Cursors.Hand, Enabled = false
             };
             _btnFetchTags.FlatAppearance.BorderSize = 0;
             _btnFetchTags.Click += BtnFetchTags_Click;
 
             var lblFetchHint = new Label
             {
-                Text = "选择服务器后，点击此按钮自动获取所有点位",
-                Location = new Point(230, 72), AutoSize = true, ForeColor = Color.Gray
+                Text = "点击「获取点位」浏览服务器地址空间，选择需要桥接的标签",
+                Location = new Point(230, 70), AutoSize = true, ForeColor = Theme.TextSecondary
             };
 
-            // 数据获取方式：异步订阅（服务器主动推送）/ 同步轮询（网关定时主动读取）
-            // 与「获取点位」按钮同行对齐（y ≈ 65-70）
-            var lblDaMode = new Label { Text = "数据获取:", Location = new Point(540, 70), AutoSize = true, ForeColor = Color.Gray };
+            var lblDaMode = new Label { Text = "获取方式:", Location = new Point(15, 100), AutoSize = true };
             _cmbDaMode = new ComboBox
             {
-                Location = new Point(610, 66), Size = new Size(150, 25), DropDownStyle = ComboBoxStyle.DropDownList
+                Location = new Point(110, 97), Size = new Size(120, 25), DropDownStyle = ComboBoxStyle.DropDownList
             };
             _cmbDaMode.Items.AddRange(new object[] { "异步订阅", "同步轮询" });
             _cmbDaMode.SelectedIndex = 0;
@@ -166,9 +178,10 @@ namespace OpcDaToUaGateway
 
             grpServer.Controls.AddRange(new Control[] { lblPrompt, _txtProgId, _btnBrowse, _lblCurrentServer, _btnFetchTags, lblFetchHint, lblDaMode, _cmbDaMode });
             Controls.Add(grpServer);
-            y += 140;
-
-            // ---- 区域 2：OPC UA 服务器设置 ----
+            return y + 140;
+        }
+        private int BuildUaServerSection(int y)
+        {
             var grpUaSettings = new GroupBox
             {
                 Text = "OPC UA 服务器设置",
@@ -177,29 +190,25 @@ namespace OpcDaToUaGateway
                 BackColor = Theme.Surface
             };
 
-            // 第 1 行：监听地址、端口号
-            var lblListen = new Label { Text = "监听地址:", Location = new Point(15, 28), AutoSize = true };
+            var lblListenAddr = new Label { Text = "监听地址:", Location = new Point(15, 30), AutoSize = true };
             _cmbListenAddress = new ComboBox
             {
-                Location = new Point(85, 25), Size = new Size(140, 25), DropDownStyle = ComboBoxStyle.DropDownList
+                Location = new Point(110, 27), Size = new Size(150, 25),
+                DropDownStyle = ComboBoxStyle.DropDownList
             };
             _cmbListenAddress.Items.AddRange(new object[] { "localhost", "0.0.0.0" });
-            _cmbListenAddress.SelectedIndex = 0;
             _cmbListenAddress.SelectedIndexChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null)
                 {
-                    Config.OpcUa.ListenAddress = _cmbListenAddress.SelectedItem.ToString();
+                    Config.OpcUa.ListenAddress = _cmbListenAddress.SelectedItem?.ToString();
                     UpdateEndpointUrlLabel();
                     _configMgr.Save();
                 }
             };
 
-            var lblPort = new Label { Text = "端口号:", Location = new Point(250, 28), AutoSize = true };
-            _nudUaPort = new NumericUpDown
-            {
-                Location = new Point(310, 25), Size = new Size(70, 25), Minimum = 1024, Maximum = 65535, Value = 4840
-            };
+            var lblPort = new Label { Text = "端口:", Location = new Point(280, 30), AutoSize = true };
+            _nudUaPort = new NumericUpDown { Location = new Point(320, 27), Size = new Size(80, 25), Minimum = 1024, Maximum = 65535 };
             _nudUaPort.ValueChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null)
@@ -210,48 +219,25 @@ namespace OpcDaToUaGateway
                 }
             };
 
-            _lblEndpointUrl = new Label
-            {
-                Text = "", Location = new Point(15, 120), AutoSize = true,
-                ForeColor = Color.DodgerBlue, Font = new Font("Consolas", 9f)
-            };
-
-            // 第 2 行：安全模式、连接数（端口号与连接数左对齐）
-            var lblSecMode = new Label { Text = "安全模式:", Location = new Point(15, 62), AutoSize = true };
+            var lblSecurity = new Label { Text = "安全模式:", Location = new Point(15, 65), AutoSize = true };
             _cmbSecurityMode = new ComboBox
             {
-                Location = new Point(85, 59), Size = new Size(140, 25), DropDownStyle = ComboBoxStyle.DropDownList
+                Location = new Point(110, 62), Size = new Size(150, 25),
+                DropDownStyle = ComboBoxStyle.DropDownList
             };
             _cmbSecurityMode.Items.AddRange(new object[] { "None", "Sign", "SignAndEncrypt" });
-            _cmbSecurityMode.SelectedIndex = 0;
             _cmbSecurityMode.SelectedIndexChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null)
                 {
-                    Config.OpcUa.SecurityMode = _cmbSecurityMode.SelectedItem.ToString();
-                    _configMgr.Save();
-                    // 安全警告标签已于 2026-07-15 移除，此处不再调用 UpdateSecurityWarning
-                }
-            };
-
-            var lblMaxSess = new Label { Text = "连接数:", Location = new Point(250, 62), AutoSize = true };
-            _nudMaxSessions = new NumericUpDown
-            {
-                Location = new Point(310, 59), Size = new Size(70, 25), Minimum = 1, Maximum = 500, Value = 50
-            };
-            _nudMaxSessions.ValueChanged += (s, ev) =>
-            {
-                if (!_isLoadingConfig && Config != null)
-                {
-                    Config.OpcUa.MaxSessionCount = (int)_nudMaxSessions.Value;
+                    Config.OpcUa.SecurityMode = _cmbSecurityMode.SelectedItem?.ToString();
                     _configMgr.Save();
                 }
             };
 
-            // 第 3 行：自动接受客户端证书（置于「安全模式」下方的独立行，2026-07-15 调整）
             _chkAutoAcceptCerts = new CheckBox
             {
-                Text = "自动接受客户端证书", Location = new Point(15, 95), AutoSize = true, Checked = true
+                Text = "自动接受客户端证书", Location = new Point(280, 63), AutoSize = true
             };
             _chkAutoAcceptCerts.CheckedChanged += (s, ev) =>
             {
@@ -262,15 +248,33 @@ namespace OpcDaToUaGateway
                 }
             };
 
+            var lblMaxSessions = new Label { Text = "最大会话数:", Location = new Point(15, 100), AutoSize = true };
+            _nudMaxSessions = new NumericUpDown { Location = new Point(110, 97), Size = new Size(80, 25), Minimum = 1, Maximum = 200 };
+            _nudMaxSessions.ValueChanged += (s, ev) =>
+            {
+                if (!_isLoadingConfig && Config != null)
+                {
+                    Config.OpcUa.MaxSessionCount = (int)_nudMaxSessions.Value;
+                    _configMgr.Save();
+                }
+            };
+
+            _lblEndpointUrl = new Label
+            {
+                Text = "端点 URL: 尚未配置", Location = new Point(15, 125), AutoSize = true,
+                ForeColor = Theme.TextSecondary
+            };
+
             grpUaSettings.Controls.AddRange(new Control[] {
-                lblListen, _cmbListenAddress, lblPort, _nudUaPort, _lblEndpointUrl,
-                lblSecMode, _cmbSecurityMode, lblMaxSess, _nudMaxSessions,
-                _chkAutoAcceptCerts
+                lblListenAddr, _cmbListenAddress, lblPort, _nudUaPort,
+                lblSecurity, _cmbSecurityMode, _chkAutoAcceptCerts,
+                lblMaxSessions, _nudMaxSessions, _lblEndpointUrl
             });
             Controls.Add(grpUaSettings);
-            y += 160;
-
-            // ---- 区域 3：控制面板 ----
+            return y + 160;
+        }
+        private int BuildControlPanelSection(int y)
+        {
             var grpControl = new GroupBox
             {
                 Text = "控制面板",
@@ -286,102 +290,73 @@ namespace OpcDaToUaGateway
             _btnStop.Enabled = false;
             _btnStop.Click += BtnStop_Click;
 
-            _btnExportTags = new Button
-            {
-                Text = "导出点表...", Location = new Point(15, 85), Size = new Size(105, 33),
-                BackColor = Theme.Purple, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
-            };
-            _btnExportTags.FlatAppearance.BorderSize = 0;
+            _btnExportTags = CreateButton("导出标签", Color.FromArgb(33, 150, 243), new Point(15, 85));
             _btnExportTags.Click += BtnExportTags_Click;
 
-            _chkAutoConnectDa = new CheckBox
-            {
-                Text = "自动连接 DA", Location = new Point(235, 25), AutoSize = true
-            };
+            var lblAutoOptions = new Label { Text = "自动选项:", Location = new Point(140, 13), AutoSize = true, ForeColor = Theme.TextSecondary };
+            _chkAutoConnectDa = new CheckBox { Text = "启动时连接 DA", Location = new Point(140, 33), AutoSize = true };
             _chkAutoConnectDa.CheckedChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null) { Config.AutoConnectDa = _chkAutoConnectDa.Checked; _configMgr.Save(); }
             };
 
-            _chkAutoStartUa = new CheckBox
-            {
-                Text = "自动启动网关", Location = new Point(235, 50), AutoSize = true
-            };
+            _chkAutoStartUa = new CheckBox { Text = "启动时启动 UA", Location = new Point(140, 53), AutoSize = true };
             _chkAutoStartUa.CheckedChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null) { Config.AutoStartUa = _chkAutoStartUa.Checked; _configMgr.Save(); }
             };
 
-            _chkEnableWatchdog = new CheckBox
+            _chkAutoStartWin = new CheckBox { Text = "开机启动", Location = new Point(140, 73), AutoSize = true };
+            _chkAutoStartWin.CheckedChanged += (s, ev) =>
             {
-                Text = "进程守护", Location = new Point(235, 75), AutoSize = true
+                if (!_isLoadingConfig && Config != null)
+                {
+                    Config.AutoStartWithWindows = _chkAutoStartWin.Checked;
+                    _autoStartMgr.SetAutoStart(_chkAutoStartWin.Checked);
+                    _configMgr.Save();
+                }
             };
+
+            _chkEnableWatchdog = new CheckBox { Text = "看门狗守护", Location = new Point(140, 93), AutoSize = true };
             _chkEnableWatchdog.CheckedChanged += (s, ev) =>
             {
                 if (!_isLoadingConfig && Config != null)
                 {
                     Config.EnableWatchdog = _chkEnableWatchdog.Checked;
                     _configMgr.Save();
-                    if (_chkEnableWatchdog.Checked)
+                    if (_watchdogMgr != null)
                     {
-                        _watchdogMgr.Start();
-                        _log.Append("[守护] 已开启进程守护");
-                    }
-                    else
-                    {
-                        _watchdogMgr.Stop();
-                        _log.Append("[守护] 已关闭进程守护");
+                        if (Config.EnableWatchdog) _watchdogMgr.Start();
+                        else _watchdogMgr.Stop();
                     }
                 }
             };
 
-            _chkAutoStartWin = new CheckBox
-            {
-                Text = "开机启动", Location = new Point(235, 100), AutoSize = true
-            };
-            _chkAutoStartWin.CheckedChanged += (s, ev) =>
-            {
-                if (!_isLoadingConfig && Config != null)
-                {
-                    Config.AutoStartWithWindows = _chkAutoStartWin.Checked;
-                    _configMgr.SetAutoStart(_chkAutoStartWin.Checked);
-                    _configMgr.Save();
-                }
-            };
-
-            _lblDaStatus = new Label { Text = "● DA: 未连接", Location = new Point(410, 25), AutoSize = true, ForeColor = Color.Gray };
-            _lblUaStatus = new Label { Text = "● UA: 未启动", Location = new Point(410, 50), AutoSize = true, ForeColor = Color.Gray };
-            _lblStats = new Label { Text = "更新: 0 | 错误: 0", Location = new Point(570, 50), AutoSize = true };
-            _lblWatchdogStatus = new Label { Text = "● 守护: 未启动", Location = new Point(410, 75), AutoSize = true, ForeColor = Color.Gray };
-            _lblLicenseStatus = new Label { Text = "● 授权: 检测中...", Location = new Point(410, 100), AutoSize = true, ForeColor = Color.Gray };
+            _lblDaStatus = new Label { Text = "● DA: 未连接", Location = new Point(340, 15), AutoSize = true, ForeColor = Color.Gray };
+            _lblUaStatus = new Label { Text = "● UA: 未启动", Location = new Point(340, 35), AutoSize = true, ForeColor = Color.Gray };
+            _lblWatchdogStatus = new Label { Text = "● 守护: 未启动", Location = new Point(340, 55), AutoSize = true, ForeColor = Color.Gray };
+            _lblLicenseStatus = new Label { Text = "", Location = new Point(340, 75), AutoSize = true, ForeColor = Color.Gray };
+            _lblStats = new Label { Text = "", Location = new Point(340, 95), AutoSize = true, ForeColor = Color.Gray };
 
             var btnAbout = new Button
             {
-                Text = "关于", Location = new Point(840, 90), Size = new Size(65, 28),
-                FlatStyle = FlatStyle.Flat, BackColor = Theme.Neutral, ForeColor = Color.White,
-                Cursor = Cursors.Hand
+                Text = "授权管理...", Location = new Point(780, 15), Size = new Size(120, 28),
+                FlatStyle = FlatStyle.Flat, BackColor = Theme.Primary, ForeColor = Color.White, Cursor = Cursors.Hand
             };
             btnAbout.FlatAppearance.BorderSize = 0;
-            btnAbout.Click += (s, ev) =>
-            {
-                using (var about = new AboutDialog(_licenseMgr.PCID, _licenseMgr.IsLicensed))
-                {
-                    var result = about.ShowDialog(this);
-                    if (result == DialogResult.OK && !string.IsNullOrEmpty(about.AuthorizationCode))
-                        _licenseMgr.ApplyAuthorizationCode(about.AuthorizationCode);
-                }
-            };
+            btnAbout.Click += BtnAbout_Click;
 
             grpControl.Controls.AddRange(new Control[] {
-                _btnStart, _btnStop, _btnExportTags, _chkAutoConnectDa, _chkAutoStartUa,
+                _btnStart, _btnStop, _btnExportTags,
+                lblAutoOptions, _chkAutoConnectDa, _chkAutoStartUa,
                 _chkAutoStartWin, _chkEnableWatchdog, _lblDaStatus, _lblUaStatus, _lblStats,
                 _lblWatchdogStatus, _lblLicenseStatus, btnAbout
             });
             Controls.Add(grpControl);
-            y += 140;
-
-            // ---- 区域 4：标签数据监控 ----
+            return y + 140;
+        }
+        private int BuildTagMonitorSection(int y)
+        {
             var grpMonitor = new GroupBox
             {
                 Text = "标签数据监控（实时）",
@@ -392,55 +367,26 @@ namespace OpcDaToUaGateway
 
             _dgvTags = new DataGridView
             {
-                Location = new Point(10, 22),
-                Size = new Size(900, 190),
-                ReadOnly = true,
-                VirtualMode = true, // 虚拟模式：不创建实际行对象，按需提供单元格数据，支持 50000+ 行
-                AllowUserToAddRows = false,
-                AllowUserToDeleteRows = false,
+                Location = new Point(10, 20), Size = new Size(900, 195),
+                AllowUserToAddRows = false, AllowUserToDeleteRows = false,
+                ReadOnly = true, RowHeadersVisible = false,
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                BackgroundColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle,
-                RowHeadersVisible = false,
-                Font = new Font("Consolas", 9.5f),
-                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+                BackgroundColor = Theme.Surface, ForeColor = Theme.TextPrimary,
+                BorderStyle = BorderStyle.None
             };
-
-            // 启用双缓冲减少大量标签行刷新时的屏幕闪烁（50000 行场景）
-            typeof(DataGridView).InvokeMember("DoubleBuffered",
-                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.SetProperty,
-                null, _dgvTags, new object[] { true });
-
-            _dgvTags.Columns.Add(new DataGridViewTextBoxColumn { Name = "colName", HeaderText = "标签名称", FillWeight = 25, SortMode = DataGridViewColumnSortMode.NotSortable });
-            _dgvTags.Columns.Add(new DataGridViewTextBoxColumn { Name = "colItemId", HeaderText = "ItemId", FillWeight = 30, SortMode = DataGridViewColumnSortMode.NotSortable });
-            _dgvTags.Columns.Add(new DataGridViewTextBoxColumn { Name = "colValue", HeaderText = "当前值", FillWeight = 20, SortMode = DataGridViewColumnSortMode.NotSortable });
-            _dgvTags.Columns.Add(new DataGridViewTextBoxColumn { Name = "colQuality", HeaderText = "质量", FillWeight = 10, SortMode = DataGridViewColumnSortMode.NotSortable });
-            _dgvTags.Columns.Add(new DataGridViewTextBoxColumn { Name = "colTime", HeaderText = "时间戳", FillWeight = 25, SortMode = DataGridViewColumnSortMode.NotSortable });
-
-            // 应用统一视觉主题：深蓝表头、交替行色、选中高亮、细网格线
-            Theme.ApplyGridStyle(_dgvTags);
-
-            // 虚拟模式：按需提供单元格数据，只在渲染可见行时触发
-            _dgvTags.CellValueNeeded += DgvTags_CellValueNeeded;
-            _dgvTags.CellFormatting += DgvTags_CellFormatting;
-
-            // 滚动时立即触发重绘，确保新可见行的数据及时显示
-            _dgvTags.Scroll += (s, ev) =>
-            {
-                if (ev.Type == ScrollEventType.ThumbTrack || ev.Type == ScrollEventType.ThumbPosition
-                    || ev.Type == ScrollEventType.SmallIncrement || ev.Type == ScrollEventType.SmallDecrement
-                    || ev.Type == ScrollEventType.LargeIncrement || ev.Type == ScrollEventType.LargeDecrement)
-                {
-                    _dgvTags.Invalidate();
-                }
-            };
+            _dgvTags.Columns.Add("TagKey", "标识");
+            _dgvTags.Columns.Add("DisplayName", "显示名称");
+            _dgvTags.Columns.Add("Value", "值");
+            _dgvTags.Columns.Add("Quality", "质量");
+            _dgvTags.Columns.Add("Timestamp", "时间戳");
 
             grpMonitor.Controls.Add(_dgvTags);
             Controls.Add(grpMonitor);
-            y += 230;
-
-            // ---- 区域 5：运行日志 ----
+            return y + 230;
+        }
+        private void BuildLogSection(int y)
+        {
             var grpLog = new GroupBox
             {
                 Text = "运行日志",
@@ -453,35 +399,27 @@ namespace OpcDaToUaGateway
 
             _txtLog = new TextBox
             {
-                Location = new Point(10, 22),
-                Size = new Size(900, 170),
-                Multiline = true,
-                ReadOnly = true,
-                ScrollBars = ScrollBars.Vertical,
-                BackColor = Theme.TerminalBg,
-                ForeColor = Theme.TextOnDark,
-                Font = new Font("Consolas", 9f),
-                BorderStyle = BorderStyle.None,
-                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right
+                Location = new Point(10, 20), Size = new Size(900, 175),
+                Multiline = true, ReadOnly = true, BackColor = Theme.TerminalBg,
+                ForeColor = Theme.TextOnDark, Font = new Font("Consolas", 9f),
+                BorderStyle = BorderStyle.None, ScrollBars = ScrollBars.Vertical
             };
 
             grpLog.Controls.Add(_txtLog);
             Controls.Add(grpLog);
-
-            // 初始化 LogManager（绑定日志文本框）
+        }
+        private void InitializeManagers()
+        {
             _log = new LogManager(_txtLog);
-
-            // 初始化 ConfigManager
             _configMgr = new ConfigManager(_log);
-
-            // 初始化 WatchdogManager（在网关管理器之前创建）
+            _autoStartMgr = new AutoStartManager(_log);
             _watchdogMgr = new WatchdogManager(_log);
 
-            // 定时刷新（P1-4: 自适应间隔，初始 1000ms）
             _refreshTimer = new Timer { Interval = AppConstants.UiDefaultRefreshMs };
             _refreshTimer.Tick += (s, e) => RefreshStats();
-
-            // ---- 系统托盘图标 ----
+        }
+        private void BuildTrayIcon()
+        {
             var trayMenu = new ContextMenuStrip();
             trayMenu.Items.Add("显示主窗口", null, (s, e) => ShowMainWindow());
             trayMenu.Items.Add(new ToolStripSeparator());
@@ -490,106 +428,37 @@ namespace OpcDaToUaGateway
             _notifyIcon = new NotifyIcon
             {
                 Text = WindowTitle,
+                Icon = Icon,
                 ContextMenuStrip = trayMenu,
                 Visible = true
             };
-
-            _notifyIcon.Icon = Icon ?? SystemIcons.Application;
             _notifyIcon.DoubleClick += (s, e) => ShowMainWindow();
+        }
+        private void SetupEventHandlersAndAutoStart()
+        {
+            _healthTimer = new Timer { Interval = AppConstants.HealthCheckIntervalMs };
+            _healthTimer.Tick += (s, e) => HealthCheck();
+            _healthTimer.Start();
 
-            if (_startMinimized)
+            // 窗口关闭事件
+            FormClosing += MainForm_FormClosing;
+            Resize += (s, e) =>
             {
-                WindowState = FormWindowState.Minimized;
-                ShowInTaskbar = false;
-                Hide();
-            }
-        }
-
-        // ================================================================
-        //  UI 辅助方法
-        // ================================================================
-
-        private void UpdateEndpointUrlLabel()
-        {
-            if (Config?.OpcUa == null) return;
-            _lblEndpointUrl.Text = Config.OpcUa.GetEndpointUrl();
-        }
-
-        private void SetUaSettingsEnabled(bool enabled)
-        {
-            _cmbListenAddress.Enabled = enabled;
-            _nudUaPort.Enabled = enabled;
-            _cmbSecurityMode.Enabled = enabled;
-            _chkAutoAcceptCerts.Enabled = enabled;
-            _nudMaxSessions.Enabled = enabled;
-        }
-
-        /// <summary>
-        /// N-2 优化：统一设置网关运行期间 UI 控件的启用/禁用状态。
-        /// 替代原先在 3 处（启动时、启动失败、停止后）的重复代码块。
-        /// </summary>
-        /// <param name="isRunning">true=运行中禁用设置控件，false=停止后恢复控件</param>
-        private void SetUiRunningState(bool isRunning)
-        {
-            _btnStart.Enabled = !isRunning;
-            _btnBrowse.Enabled = !isRunning;
-            _btnFetchTags.Enabled = !isRunning;
-            _btnExportTags.Enabled = true; // 导出在运行中也可用，启动失败和停止后也恢复
-            _txtProgId.ReadOnly = isRunning;
-            SetUaSettingsEnabled(!isRunning);
-            // V1.9.0: 网关停止后，根据 ProgId 是否非空重新校准按钮状态
-            if (!isRunning)
-            {
-                UpdateDaButtonsState();
-            }
-        }
-
-        /// <summary>
-        /// PLAN 3.5: 显示内存增长率告警到状态栏。severity: 0=清除 1=黄色 2=红色。
-        /// 不弹窗，避免现场操作员误关。
-        /// </summary>
-        private void ShowMemoryAlert(string message, int severity)
-        {
-            // severity 0 不直接处理（视为正常清除），保留 1/2 红色/黄色提示
-            if (severity <= 0) return;
-            _lblWatchdogStatus.Text = message;   // 复用看门狗状态栏显示
-            _lblWatchdogStatus.ForeColor = severity >= 2 ? Color.Red : Color.OrangeRed;
-        }
-
-        private Button CreateButton(string text, Color bgColor, Point location)
-        {
-            var btn = new Button
-            {
-                Text = text, Location = location, Size = new Size(105, 33),
-                BackColor = bgColor, ForeColor = Color.White, FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand
+                if (WindowState == FormWindowState.Minimized)
+                    HideToTray();
             };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.FlatAppearance.MouseOverBackColor = ControlPaint.Light(bgColor, 0.15f);
-            btn.FlatAppearance.MouseDownBackColor = ControlPaint.Dark(bgColor, 0.1f);
-            return btn;
+
+            // 导出标签
+            _btnExportTags.Enabled = Config?.OpcDa?.Tags != null && Config.OpcDa.Tags.Count > 0;
+
+            // 启动自动连接/启动
+            if (Config != null)
+            {
+                if (Config.AutoConnectDa || Config.AutoStartUa)
+                    _log.Append("检测到自动选项，将在 1 秒后自动启动网关...");
+            }
         }
 
-        private void UpdateTagGrid(List<TagConfig> tags)
-        {
-            _gridTags = tags ?? new List<TagConfig>();
-
-            // 虚拟模式：只设置行数，不创建实际行对象。
-            // DataGridView 仅在渲染可见行时通过 CellValueNeeded 事件按需获取数据。
-            _dgvTags.RowCount = _gridTags.Count;
-            _dgvTags.Invalidate();
-        }
-
-        /// <summary>
-        /// N-10: 根据当前 ProgId 是否非空，统一控制「获取点位」「启动网关」按钮的可用状态。
-        /// 未选择 OPC DA 服务器时，这两个按钮不可操作。
-        /// </summary>
-        private void UpdateDaButtonsState()
-        {
-            bool hasServer = !string.IsNullOrEmpty(_txtProgId?.Text?.Trim());
-            _btnFetchTags.Enabled = hasServer;
-            _btnStart.Enabled = hasServer;
-        }
 
         // ================================================================
         //  服务器选择 & 点位获取
@@ -609,7 +478,6 @@ namespace OpcDaToUaGateway
                         _lblCurrentServer.ForeColor = Color.DarkGreen;
                     }
                     _configMgr.SaveProgId(dialog.SelectedProgId);
-                    // V1.9.0: 选择服务器后启用「获取点位」「启动网关」
                     UpdateDaButtonsState();
                 }
             }
@@ -625,7 +493,6 @@ namespace OpcDaToUaGateway
                 return;
             }
 
-            // 立即打开浏览窗口，浏览操作在窗口内后台执行
             _btnFetchTags.Enabled = false;
             _lblCurrentServer.Text = "正在获取点位...";
             _lblCurrentServer.ForeColor = Color.Blue;
@@ -633,22 +500,19 @@ namespace OpcDaToUaGateway
 
             try
             {
-                // 立即创建并显示对话框，浏览操作在对话框内后台执行
                 using (var dialog = new ItemSelectionDialog(progId, _log.Append, Config.OpcUa.NamespaceIndex))
                 {
-                    _btnFetchTags.Enabled = true;  // 重新启用，对话框内有自己的UI控制
-                    
+                    _btnFetchTags.Enabled = true;
+
                     var result = dialog.ShowDialog(this);
-                    
+
                     if (result == DialogResult.OK && dialog.SelectedTags != null && dialog.SelectedTags.Count > 0)
                     {
                         foreach (var tag in dialog.SelectedTags)
                             tag.DisplayName = $"{progId}_{tag.ItemId}";
 
                         Config.OpcDa.Tags = dialog.SelectedTags;
-                        // TagKeys 已在对话框 BtnOK_Click 中分配（Task #36），无需重复调用
                         UpdateTagGrid(dialog.SelectedTags);
-                        // P1-1: 标签数据写入独立的 tags.json，网关配置写入 config.json
                         _configMgr.SaveTagsImmediate();
                         _configMgr.Save();
 
@@ -677,18 +541,126 @@ namespace OpcDaToUaGateway
             }
         }
 
+        private void UpdateDaButtonsState()
+        {
+            bool hasProgId = !string.IsNullOrEmpty(_txtProgId?.Text?.Trim());
+            _btnFetchTags.Enabled = hasProgId;
+        }
+
+        private void UpdateEndpointUrlLabel()
+        {
+            if (_lblEndpointUrl != null && Config?.OpcUa != null)
+                _lblEndpointUrl.Text = $"端点 URL: {Config.OpcUa.GetEndpointUrl()}";
+        }
+
+        private void UpdateTagGrid(List<TagConfig> tags)
+        {
+            if (_dgvTags == null) return;
+            _dgvTags.Rows.Clear();
+            if (tags == null) return;
+            foreach (var tag in tags)
+                _dgvTags.Rows.Add(tag.TagKey, tag.DisplayName, "", "", "");
+        }
+
+        private static Button CreateButton(string text, Color color, Point location)
+        {
+            return new Button
+            {
+                Text = text,
+                Location = location,
+                Size = new Size(110, 28),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = color,
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand,
+                FlatAppearance = { BorderSize = 0 }
+            };
+        }
+
+                private void SetUiRunningState(bool isRunning)
+        {
+            _btnStart.Enabled = !isRunning;
+            _btnBrowse.Enabled = !isRunning;
+            _btnFetchTags.Enabled = !isRunning;
+            _btnExportTags.Enabled = true;
+            _cmbDaMode.Enabled = !isRunning;
+            _cmbListenAddress.Enabled = !isRunning;
+            _nudUaPort.Enabled = !isRunning;
+            _cmbSecurityMode.Enabled = !isRunning;
+            _chkAutoAcceptCerts.Enabled = !isRunning;
+            _nudMaxSessions.Enabled = !isRunning;
+            _chkAutoConnectDa.Enabled = !isRunning;
+            _chkAutoStartUa.Enabled = !isRunning;
+            _chkAutoStartWin.Enabled = !isRunning;
+            _chkEnableWatchdog.Enabled = !isRunning;
+        }
+
+        private void BtnAbout_Click(object sender, EventArgs e)
+        {
+            using (var about = new AboutDialog(LicenseAlgorithm.GeneratePCID(), _licenseMgr?.IsLicensed ?? false))
+            {
+                if (about.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(about.AuthorizationCode))
+                    _licenseMgr.ApplyAuthorizationCode(about.AuthorizationCode);
+            }
+        }
+
         // ================================================================
-        //  配置加载
+        //  健康检查
         // ================================================================
 
+        private void HealthCheck()
+        {
+            _gatewayMgr?.CheckHealth();
+        }
+
+        private void ScheduleAutoStartIfNeeded()
+        {
+            if (Config?.AutoStartUa != true || Config.OpcDa?.Tags?.Count <= 0)
+                return;
+
+            _log.Append("[自动启动] 检测到自动启动选项已启用，1 秒后启动网关...");
+            var timer = new Timer { Interval = 1000 };
+            EventHandler tick = null;
+            tick = (sender, e) =>
+            {
+                timer.Stop();
+                timer.Tick -= tick;
+                timer.Dispose();
+                if (ReferenceEquals(_autoStartTimer, timer))
+                    _autoStartTimer = null;
+
+                HideToTray();
+                BtnStart_Click(null, EventArgs.Empty);
+            };
+
+            _autoStartTimer = timer;
+            timer.Tick += tick;
+            timer.Start();
+        }
+
+        private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (!_forceClose && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                HideToTray();
+            }
+        }
+
+        private void ShowMemoryAlert(string msg, int severity)
+        {
+            if (severity >= 2)
+                _log.Append($"[内存告警] {msg}");
+        }
         private void LoadConfiguration()
         {
             if (!_configMgr.Load())
             {
-                // C-14 修复：配置加载失败时禁用所有交互控件，防止 null 引用
+                // 配置加载失败时禁用所有交互控件，防止 null 引用
                 _btnStart.Enabled = false;
                 _btnStop.Enabled = false;
                 _btnExportTags.Enabled = false;
+
                 _chkAutoConnectDa.Enabled = false;
                 _chkAutoStartUa.Enabled = false;
                 _chkEnableWatchdog.Enabled = false;
@@ -792,7 +764,7 @@ namespace OpcDaToUaGateway
 
             _gatewayMgr.RunningStateChanged += (isRunning) =>
             {
-                // P2 修复：该事件由 GatewayManager 后台线程（StartAsync 经 ConfigureAwait(false) 后的延续）
+                // 该事件由 GatewayManager 后台线程（StartAsync 经 ConfigureAwait(false) 后的延续）
                 // 触发，直接操作控件会抛 Cross-thread 异常。统一经 SafeInvoke 封送回 UI 线程。
                 SafeInvoke(() => SetUiRunningState(isRunning));
             };
@@ -805,7 +777,7 @@ namespace OpcDaToUaGateway
                 _lblCurrentServer.ForeColor = Color.DarkGreen;
             }
 
-            // V1.9.0: 配置加载后，根据 ProgId 是否非空启用按钮
+            // 配置加载后，根据 ProgId 是否非空启用按钮
             UpdateDaButtonsState();
 
             if (Config.OpcDa.Tags != null)
@@ -817,21 +789,7 @@ namespace OpcDaToUaGateway
                 _log.Append("[守护] 已开启进程守护");
             }
 
-            if (Config.AutoStartUa && Config.OpcDa.Tags?.Count > 0)
-            {
-                _log.Append("[自动启动] 检测到自动启动选项已启用，1 秒后启动网关...");
-                _autoStartTimer = new Timer { Interval = 1000 };
-                _autoStartTimer.Tick += (s, ev) =>
-                {
-                    _autoStartTimer.Stop();
-                    _autoStartTimer.Dispose();
-                    _autoStartTimer = null;
-                    HideToTray();
-                    BtnStart_Click(null, EventArgs.Empty);
-                };
-                _autoStartTimer.Start();
-            }
-            else if (Config.AutoConnectDa && !string.IsNullOrEmpty(Config.OpcDa.ServerProgId))
+            if (Config.AutoConnectDa && !Config.AutoStartUa && !string.IsNullOrEmpty(Config.OpcDa.ServerProgId))
             {
                 _log.Append($"[自动连接] 已恢复到上次连接的服务器: {Config.LastConnectedProgId}");
             }
@@ -842,7 +800,7 @@ namespace OpcDaToUaGateway
             {
                 SafeInvoke(() => { _lblLicenseStatus.Text = text; _lblLicenseStatus.ForeColor = color; });
             };
-            _licenseMgr.GatewayStopRequested += async () =>
+            Func<Task> handleTrialExpiredAsync = async () =>
             {
                 // 试用到期，停止网关 (在 UI 线程上执行)
                 _log.Append("[授权] 正在停止网关...");
@@ -861,6 +819,7 @@ namespace OpcDaToUaGateway
                 _btnBrowse.Enabled = false;
                 _btnFetchTags.Enabled = false;
 
+
                 MessageBox.Show(
                     "软件试用期（30 分钟）已到，网关已自动停止。\n\n" +
                     "请获取授权码后在\"关于\"窗口中输入以继续使用。\n" +
@@ -871,6 +830,11 @@ namespace OpcDaToUaGateway
                 _notifyIcon.Visible = false;
                 Close();
             };
+            _licenseMgr.GatewayStopRequested += async () => await handleTrialExpiredAsync();
+            if (_licenseMgr.IsTrialExpired)
+                _ = handleTrialExpiredAsync();
+            else
+                ScheduleAutoStartIfNeeded();
         }
 
         // ================================================================
@@ -924,9 +888,6 @@ namespace OpcDaToUaGateway
                 _log.Append("========================================");
 
                 _refreshTimer.Start();
-
-                _healthTimer = new Timer { Interval = AppConstants.HealthCheckIntervalMs };
-                _healthTimer.Tick += (s2, e2) => _gatewayMgr?.CheckHealth();
                 _healthTimer.Start();
 
                 _btnStop.Enabled = true;
@@ -939,8 +900,10 @@ namespace OpcDaToUaGateway
             }
             catch (Exception ex)
             {
+                // M1 修复：启动异常已由 GatewayManager 回滚资源并设置 Error 状态，
+                // 此处需要提示用户调用 ClearErrorState() 后才能重试。
                 _log.Append($"启动失败: {ex.Message}");
-                MessageBox.Show($"启动失败:\n\n{ex.Message}", "错误",
+                MessageBox.Show($"启动失败:\n\n{ex.Message}\n\n请检查日志后点击\"清除错误状态\"按钮重试。", "错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 _refreshTimer?.Stop();
             }
@@ -951,8 +914,6 @@ namespace OpcDaToUaGateway
             _btnStop.Enabled = false;
             _refreshTimer.Stop();
             _healthTimer?.Stop();
-            _healthTimer?.Dispose();
-            _healthTimer = null;
 
             try
             {
@@ -972,87 +933,31 @@ namespace OpcDaToUaGateway
         {
             if (Config?.OpcDa?.Tags == null || Config.OpcDa.Tags.Count == 0)
             {
-                MessageBox.Show("当前没有点位可导出。\n请先获取点位。",
-                    "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("当前没有点位可导出。\n请先获取点位。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-
             using (var sfd = new SaveFileDialog())
             {
-                sfd.Title = "导出 OPC UA 点表";
+                sfd.Title = "导出点位配置 CSV";
                 sfd.Filter = "CSV 文件 (*.csv)|*.csv";
-                sfd.FileName = $"OPC_UA点表_{Config.OpcDa.ServerProgId}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+                sfd.FileName = $"Tags_{Config.OpcDa.ServerProgId}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
                 sfd.DefaultExt = "csv";
-
                 if (sfd.ShowDialog(this) == DialogResult.OK)
                 {
                     _btnExportTags.Enabled = false;
                     try
                     {
-                        int tagCount = Config.OpcDa.Tags.Count;
-                        var uaServer = _gatewayMgr?.UaServer;
-                        ushort nsIndex = (uaServer != null && uaServer.IsRunning && uaServer.NamespaceIndex > 0)
-                            ? uaServer.NamespaceIndex
-                            : ((Config.OpcUa?.NamespaceIndex > 0) ? Config.OpcUa.NamespaceIndex : (ushort)2);
-                        string nsUri = uaServer?.NamespaceUri ?? Config.OpcUa?.NamespaceUri ?? "";
-                        string endpointUrl = Config.OpcUa?.GetEndpointUrl() ?? "";
-                        var tags = Config.OpcDa.Tags;
-                        string progId = Config.OpcDa.ServerProgId ?? "";
-
-                        _log.Append($"正在生成 OPC UA 点表 ({tagCount} 个点位)...");
-
                         await Task.Run(() =>
                         {
-                            var sb = new StringBuilder();
-                            sb.AppendLine("# OPC UA 点表完整信息");
-                            sb.AppendLine($"# 导出时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                            sb.AppendLine($"# DA 服务器: {progId}");
-                            sb.AppendLine($"# UA 端点: {endpointUrl}");
-                            sb.AppendLine($"# UA 命名空间 URI: {nsUri}");
-                            sb.AppendLine($"# UA 命名空间索引: {nsIndex}");
-                            sb.AppendLine($"# 点位数: {tagCount}");
-                            sb.AppendLine();
-                            sb.AppendLine("序号,DA_ItemId,UA_DisplayName,UA_BrowseName,DA_DataType,UA_NodeId,UA_NamespaceUri,UA_EndpointUrl,UA_BrowsePath");
-
-                            int idx = 1;
-                            foreach (var tag in tags)
-                            {
-                                string itemId = tag.ItemId ?? "";
-                                string displayName = tag.DisplayName ?? itemId;
-                                string tagKey = tag.TagKey ?? itemId;
-                                string dataType = tag.DataType ?? "Variant";
-                                string nodeId = EscapeCsv($"ns={nsIndex};s={tag.UaNodeId ?? $"DaTag_{tagKey}"}");
-                                string browsePath = EscapeCsv(GatewayOpcUaServer.ComputeUaBrowsePath(itemId, displayName));
-
-                                sb.Append(idx); sb.Append(',');
-                                sb.Append(EscapeCsv(itemId)); sb.Append(',');
-                                sb.Append(EscapeCsv(displayName)); sb.Append(',');
-                                sb.Append(EscapeCsv(itemId)); sb.Append(',');
-                                sb.Append(EscapeCsv(dataType)); sb.Append(',');
-                                sb.Append(nodeId); sb.Append(',');
-                                sb.Append(EscapeCsv(nsUri)); sb.Append(',');
-                                sb.Append(EscapeCsv(endpointUrl)); sb.Append(',');
-                                sb.Append(browsePath);
-                                sb.AppendLine();
-                                idx++;
-                            }
-
-                            System.IO.File.WriteAllText(sfd.FileName, sb.ToString(), new UTF8Encoding(true));
+                            ushort nsIndex = _gatewayMgr?.UaServer != null && _gatewayMgr.UaServer.NamespaceIndex > 0 ? _gatewayMgr.UaServer.NamespaceIndex : (ushort)(Config?.OpcUa?.NamespaceIndex ?? 2);
+                            bool ok = CsvTagExporter.ExportToFile(Config.OpcDa.Tags, Config.OpcDa.ServerProgId, sfd.FileName, nsIndex, _log);
+                            if (!ok) throw new InvalidOperationException("导出失败，请查看日志。");
                         });
-
-                        _log.Append($"OPC UA 点表已导出: {sfd.FileName} ({tagCount} 个点位)");
-
-                        MessageBox.Show(
-                            $"OPC UA 点表导出成功！\n" +
-                            $"文件: {sfd.FileName}\n" +
-                            $"共 {tagCount} 个点位\n" +
-                            $"命名空间: ns={nsIndex} | {nsUri}",
-                            "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show($"CSV 导出成功！\n文件: {sfd.FileName}\n共 {Config.OpcDa.Tags.Count} 个标签", "导出成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     catch (Exception ex)
                     {
-                        MessageBox.Show($"导出失败:\n{ex.Message}", "错误",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show($"导出失败:\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                     finally
                     {
@@ -1061,97 +966,46 @@ namespace OpcDaToUaGateway
                 }
             }
         }
-
+        /// <summary>
+        /// 定时刷新：从 DataBridge 获取快照缓存，更新 UI 统计标签。
+        /// </summary>
         private void RefreshStats()
         {
             if (_gatewayMgr?.Bridge == null) return;
 
+            _cachedSnapshots = _gatewayMgr.Bridge.GetSnapshots();
+            _dgvTags.RowCount = _cachedSnapshots.Count;
+            _dgvTags.Invalidate();
+
+            // 自适应刷新间隔
+            int currentHash = _cachedSnapshots != null ? GetSnapshotHash(_cachedSnapshots) : 0;
+            bool hasChange = currentHash != _lastSnapshotHash;
+            _lastSnapshotHash = currentHash;
+
+            // 更新统计标签
             var bridge = _gatewayMgr.Bridge;
-            _lblStats.Text = $"更新: {bridge.TotalUpdates} | 错误: {bridge.ErrorCount}";
+            long totalUpdates = bridge.TotalUpdates;
+            int errorCount = bridge.ErrorCount;
+            _lblStats.Text = $"更新: {totalUpdates} | 错误: {errorCount}";
 
-            // P1-4 自适应刷新: 比较快照哈希，无变化时放宽到 3s，有变化时恢复 1s
-            _cachedSnapshots = bridge.GetSnapshots();
-            int hash = _cachedSnapshots?.Count ?? 0;
-            if (_cachedSnapshots != null && _cachedSnapshots.Count > 0)
-            {
-                // H-39: 聚合所有快照的 Value 哈希，而非仅第 0 行。
-                //       确保任何一行数据变化都能触发快速刷新（1s 间隔）。
-                //       使用 XOR 聚合避免遍历中溢出，50000 行约 0.5ms。
-                foreach (var snap in _cachedSnapshots)
-                    hash ^= (snap.Value?.GetHashCode() ?? 0);
-            }
-
-            if (hash != _lastSnapshotHash)
-            {
-                _lastSnapshotHash = hash;
-                if (_refreshTimer != null && _refreshTimer.Interval != AppConstants.UiDefaultRefreshMs)
-                    _refreshTimer.Interval = AppConstants.UiDefaultRefreshMs;
-            }
-            else
-            {
-                if (_refreshTimer != null && _refreshTimer.Interval != AppConstants.UiSlowRefreshMs)
-                    _refreshTimer.Interval = AppConstants.UiSlowRefreshMs;
-            }
-
-            // 虚拟模式：不需要逐行设置 Cell.Value。
-            // 只需 Invalidate 可见区域，DataGridView 会通过 CellValueNeeded 事件按需获取最新数据。
-            if (_dgvTags.RowCount > 0)
-            {
-                int firstVisible;
-                try { firstVisible = _dgvTags.FirstDisplayedScrollingRowIndex; }
-                catch { firstVisible = 0; }
-                if (firstVisible < 0) firstVisible = 0;
-
-                int rowHeight = _dgvTags.RowTemplate.Height > 0 ? _dgvTags.RowTemplate.Height : 22;
-                int visibleCount = (_dgvTags.DisplayRectangle.Height / rowHeight) + 2;
-                int lastVisible = Math.Min(firstVisible + visibleCount, _dgvTags.RowCount);
-
-                // 仅使可见行失效，触发 CellValueNeeded 重新获取数据
-                for (int i = firstVisible; i < lastVisible; i++)
-                    _dgvTags.InvalidateRow(i);
-            }
+            // 无变化时降低刷新频率
+            if (!hasChange && _refreshTimer.Interval < AppConstants.UiSlowRefreshMs)
+                _refreshTimer.Interval = AppConstants.UiSlowRefreshMs;
+            else if (hasChange && _refreshTimer.Interval >= AppConstants.UiSlowRefreshMs)
+                _refreshTimer.Interval = AppConstants.UiDefaultRefreshMs;
         }
 
-        /// <summary>
-        /// 虚拟模式回调：DataGridView 渲染每个可见单元格时调用，按需提供数据。
-        /// 这是 50000 行场景下唯一的数据供给路径，避免了预先创建所有行对象。
-        /// </summary>
-        private void DgvTags_CellValueNeeded(object sender, DataGridViewCellValueEventArgs e)
+        /// <summary>计算快照特征哈希，用于检测数据是否变化。</summary>
+        private static int GetSnapshotHash(IReadOnlyList<TagSnapshot> snapshots)
         {
-            if (_gridTags == null || e.RowIndex >= _gridTags.Count) return;
-
-            var tag = _gridTags[e.RowIndex];
-
-            switch (e.ColumnIndex)
+            if (snapshots == null || snapshots.Count == 0) return 0;
+            int hash = 17;
+            foreach (var s in snapshots)
             {
-                case 0: // 标签名称
-                    e.Value = tag.DisplayName;
-                    break;
-                case 1: // ItemId
-                    e.Value = tag.ItemId;
-                    break;
-                case 2: // 当前值
-                case 3: // 质量
-                case 4: // 时间戳
-                    // 从缓存的快照引用获取实时数据（每个刷新周期只构建一次）
-                    if (_cachedSnapshots != null && e.RowIndex < _cachedSnapshots.Count)
-                    {
-                        var snap = _cachedSnapshots[e.RowIndex];
-                        switch (e.ColumnIndex)
-                        {
-                            case 2: e.Value = snap.Value; break;
-                            case 3: e.Value = snap.Quality; break;
-                            case 4: e.Value = snap.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff"); break;
-                        }
-                    }
-                    else
-                    {
-                        e.Value = "-";
-                    }
-                    break;
+                hash = hash * 31 + (s.Value?.GetHashCode() ?? 0);
             }
+            return hash;
         }
-
         /// <summary>
         /// 虚拟模式回调：设置单元格显示样式（质量列颜色）。
         /// </summary>
@@ -1203,6 +1057,9 @@ namespace OpcDaToUaGateway
 
         protected override async void OnFormClosing(FormClosingEventArgs e)
         {
+            // 单一标志位控制关闭流程
+            // 第一次 Close：用户点击关闭 → 最小化到托盘
+            // 第二次 Close：异步关闭完成后的资源释放
             if (!_forceClose && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
@@ -1210,20 +1067,12 @@ namespace OpcDaToUaGateway
                 return;
             }
 
-            // C-15 修复：第二次 Close() 时 _isShuttingDown 已为 true，
-            // 跳过异步关闭逻辑但必须执行资源释放
-            if (_closeInProgress && !_isShuttingDone)
-                return;
-
             if (!_isShuttingDown)
             {
                 e.Cancel = true;
                 _isShuttingDown = true;
-                _closeInProgress = true;
 
-                // R-2 修复：移除重复的 Timer Stop/Dispose（H-29 引入的冗余代码）。
-                // 仅保留捕获局部引用 → 置 null → Dispose 的单一路径，
-                // 避免对已释放的 Timer 重复调用 Stop/Dispose。
+                // 捕获局部引用后置 null，防止重复释放
                 var refreshTimer = _refreshTimer;
                 var healthTimer = _healthTimer;
                 var autoStartTimer = _autoStartTimer;
@@ -1238,12 +1087,11 @@ namespace OpcDaToUaGateway
                 autoStartTimer?.Stop();
                 autoStartTimer?.Dispose();
 
-                // 主程序退出时发送优雅退出信号，看门狗保持运行但不重启主进程
-                // 只有取消勾选"进程守护"复选框时才会真正停止看门狗
+                // 发送优雅退出信号
                 try { _watchdogMgr?.SignalGracefulExit(); }
                 catch (Exception ex) { _log?.Append($"关闭时发送退出信号异常: {ex.Message}"); }
 
-                // P0 修复：try-catch 包裹 StopAsync，防止异常导致窗口永远无法关闭
+                // 异步关闭网关
                 try
                 {
                     if (_gatewayMgr != null)
@@ -1254,13 +1102,13 @@ namespace OpcDaToUaGateway
                     _log?.Append($"关闭时停止网关异常: {ex.Message}");
                 }
 
+                // 标记强制关闭，触发第二次 Close 执行资源释放
                 _forceClose = true;
-                _isShuttingDone = true;
                 Close();
                 return;
             }
 
-            // C-15 修复：确保资源释放在第二次 Close() 时执行
+            // 第二次 Close：执行资源释放
             _log?.Dispose();
             _notifyIcon?.Dispose();
             _licenseMgr?.Dispose();
@@ -1282,7 +1130,19 @@ namespace OpcDaToUaGateway
         private void SafeInvoke(Action a)
         {
             if (IsDisposed || !IsHandleCreated) return;
-            if (InvokeRequired) Invoke(a); else a();
+            try
+            {
+                if (InvokeRequired) BeginInvoke(a); else a();
+            }
+            catch (ObjectDisposedException)
+            {
+                // 在检查 IsHandleCreated 和执行 a() 之间，窗体可能已被释放，
+                // 安全忽略即可。
+            }
+            catch (InvalidOperationException)
+            {
+                // 跨线程调用目标已销毁时也忽略。
+            }
         }
 
         /// <summary>

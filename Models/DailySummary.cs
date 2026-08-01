@@ -15,7 +15,7 @@ namespace OpcDaToUaGateway.Models
         public double PrivateMemoryAvgMB { get; set; }
         public double GcTotalMemoryAvgMB { get; set; }
         public double UpdateRateAvgPerSec { get; set; }
-        public int TotalUpdatesEndOfDay { get; set; }
+        public long TotalUpdatesEndOfDay { get; set; }
         public int ErrorCountEndOfDay { get; set; }
         public int DaDisconnectedCount { get; set; }
         public string GrowthAlert { get; set; }       // "none"/"warning"/"critical"

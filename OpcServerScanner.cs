@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -246,7 +246,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
         }
 
         /// <summary>
@@ -283,7 +283,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
         }
 
         // ================================================================
@@ -474,7 +474,7 @@ namespace OpcDaToUaGateway
             {
                 serverList.QueryCLSID(ref catId, out enumerator);
             }
-            catch { return; }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); return; }
 
             if (enumerator == null) return;
 
@@ -496,7 +496,7 @@ namespace OpcDaToUaGateway
 
                     // 优先通过 COM 接口获取 ProgID，回退到注册表查找。
                     string progId = null;
-                    try { serverList.GetProgIDFromCLSID(ref clsid, out progId); } catch { }
+                    try { serverList.GetProgIDFromCLSID(ref clsid, out progId); } catch (Exception ex) { Log($"[扫描] GetProgIDFromCLSID 失败: {ex.Message}"); }
                     if (string.IsNullOrEmpty(progId)) progId = ProgIdFromClsidRegistry(clsidStr);
                     if (string.IsNullOrEmpty(progId)) continue;
                     // 去重：如果已由其他策略发现，跳过。
@@ -584,9 +584,9 @@ namespace OpcDaToUaGateway
                         Source = "ProgIdScan"
                     };
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 跳过无权限访问或格式异常的注册表项（在 HKCR 中很常见）。
+                    Log($"[注册表] 读取 HKCR 值失败: {ex.Message}");
                 }
             }
         }
@@ -625,7 +625,7 @@ namespace OpcDaToUaGateway
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
             }
 
             // 3. 检查 Implemented Categories 子键（COM 组件声明自己实现的组件类别）。
@@ -646,7 +646,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
 
             // 4. 检查 CLSID 注册表项的描述中是否包含 "OPC"。
             try
@@ -658,7 +658,7 @@ namespace OpcDaToUaGateway
                         return true;
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
 
             return false;
         }
@@ -725,11 +725,11 @@ namespace OpcDaToUaGateway
                                     }
                                 }
                             }
-                            catch { }
+                            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
             }
         }
 
@@ -802,7 +802,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
 
             return null;
         }
@@ -835,7 +835,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
 
             return null;
         }
@@ -854,7 +854,7 @@ namespace OpcDaToUaGateway
                     return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
                 }
             }
-            catch { return null; }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); return null; }
         }
 
         /// <summary>
@@ -889,7 +889,7 @@ namespace OpcDaToUaGateway
                     }
                 }
             }
-            catch { }
+            catch (Exception ex) { Log($"[扫描] 操作失败: {ex.Message}"); }
 
             return null;
         }

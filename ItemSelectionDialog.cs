@@ -165,7 +165,7 @@ namespace OpcDaToUaGateway
                 var item = _displayItems[e.ItemIndex];
                 var lvi = new ListViewItem(item.ItemId);
                 lvi.SubItems.Add(item.Name ?? "");
-                lvi.SubItems.Add(item.DataTypeName ?? "Variant");
+                lvi.SubItems.Add(item.DataTypeName ?? AppConstants.UnknownDataType);
                 lvi.SubItems.Add(item.Description ?? "");
                 lvi.Checked = _checkedItemIds.Contains(item.ItemId);
                 e.Item = lvi;
@@ -519,16 +519,20 @@ namespace OpcDaToUaGateway
                     try
                     {
                         var sb = new System.Text.StringBuilder();
-                        sb.AppendLine($"# 服务器: {_serverProgId}");
-                        sb.AppendLine($"# 导出时间: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                        sb.AppendLine($"# 已选点位: {checkedItems.Count}");
-                        sb.AppendLine();
-                        sb.AppendLine("序号,ItemId,名称,数据类型,描述");
+                        // 头部行 1~3（5 列格式，与 CsvTagExporter 一致）
+                        sb.AppendLine(MakeRow("#不用改", "#服务器:", _serverProgId ?? "", "", ""));
+                        sb.AppendLine(MakeRow("#不用改", "#导出时间:", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), "", ""));
+                        sb.AppendLine(MakeRow("#修改C3", "#已选点位:", checkedItems.Count.ToString(), "", ""));
+                        // 第 4~5 行：空行
+                        sb.AppendLine(",,,,");
+                        sb.AppendLine(",,,,");
+                        // 表头行
+                        sb.AppendLine(MakeRow("序号", "ItemId", "名称", "数据类型", "描述"));
 
                         int index = 1;
                         foreach (var item in checkedItems)
                         {
-                            sb.AppendLine($"{index},{EscapeCsv(item.ItemId)},{EscapeCsv(item.Name)},{EscapeCsv(item.DataTypeName)},{EscapeCsv(item.Description)}");
+                            sb.AppendLine(MakeRow(index.ToString(), EscapeCsv(item.ItemId), EscapeCsv(item.Name), EscapeCsv(item.DataTypeName), EscapeCsv(item.Description)));
                             index++;
                         }
 
@@ -564,42 +568,55 @@ namespace OpcDaToUaGateway
                 {
                     try
                     {
-                        string[] lines = File.ReadAllLines(ofd.FileName, System.Text.Encoding.UTF8);
+                        string[] lines = File.ReadAllLines(ofd.FileName, DetectEncoding(ofd.FileName));
 
-                        // 解析 ItemId 列表（跳过注释行 # 和表头行）
+                        // 解析 CSV：跳过固定头部行（#不用改、#导出时间、#已选点位）
+                        // 以及空行和表头行，从第7行开始读取数据
                         var importItemIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        int expectedCount = 0;
                         bool headerPassed = false;
+                        int dataRowCount = 0;
 
-                        foreach (string rawLine in lines)
+                        for (int i = 0; i < lines.Length; i++)
                         {
-                            string line = rawLine.Trim();
+                            string line = lines[i].Trim();
                             if (string.IsNullOrEmpty(line)) continue;
-                            if (line.StartsWith("#")) continue;
 
-                            // 第一行非注释行视为表头，跳过
-                            if (!headerPassed)
+                            // 提取 #已选点位: 后面的数字（第3行）
+                            if (line.Contains("#已选点位:"))
                             {
-                                headerPassed = true;
+                                string countStr = ParseHeaderLine(line, "#已选点位:");
+                                int.TryParse(countStr, out expectedCount);
                                 continue;
                             }
 
-                            // 解析 CSV 行，取第二列作为 ItemId
+                            // 跳过所有头部注释行（#不用改、#修改C3 等）
+                            if (line.StartsWith("#")) continue;
+
+                            // 跳过空行（,,,,）
+                            if (line.TrimEnd(',', ' ') == "") continue;
+
+                            // 跳过表头行
+                            if (!headerPassed)
+                            {
+                                if (line.StartsWith("序号") && line.Contains("ItemId"))
+                                {
+                                    headerPassed = true;
+                                    continue;
+                                }
+                                // 如果不是表头行，说明还没到数据区，跳过
+                                continue;
+                            }
+
+                            // 数据行：解析 CSV，取第二列（B列）作为 ItemId
                             string[] cols = ParseCsvLine(line);
                             if (cols.Length >= 2)
                             {
-                                string itemId = cols[1].Trim();
+                                string itemId = cols[1].Trim(); // B 列：ItemId
                                 if (!string.IsNullOrEmpty(itemId))
                                 {
                                     importItemIds.Add(itemId);
-                                }
-                            }
-                            else if (cols.Length == 1)
-                            {
-                                // 兼容只有 ItemId 一列的格式
-                                string itemId = cols[0].Trim();
-                                if (!string.IsNullOrEmpty(itemId))
-                                {
-                                    importItemIds.Add(itemId);
+                                    dataRowCount++;
                                 }
                             }
                         }
@@ -609,6 +626,23 @@ namespace OpcDaToUaGateway
                             MessageBox.Show("CSV 文件中未找到有效的点位数据。",
                                 "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                             return;
+                        }
+
+                        // 校验已选点位数量
+                        if (expectedCount > 0 && dataRowCount != expectedCount)
+                        {
+                            var result = MessageBox.Show(
+                                $"⚠️ 点位数量不一致！\n\n" +
+                                $"表格中填写的已选点位: {expectedCount}\n" +
+                                $"实际数据行数: {dataRowCount}\n\n" +
+                                $"将以实际数据为准继续导入。\n" +
+                                $"请修改表格中的已选点位数量后重试。\n\n" +
+                                "是否继续导入？",
+                                "数量校验警告",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Warning);
+                            if (result != DialogResult.Yes)
+                                return;
                         }
 
                         // 在列表中勾选匹配的点位，取消不匹配的
@@ -662,6 +696,34 @@ namespace OpcDaToUaGateway
         //  CSV 辅助方法
         // ================================================================
 
+        /// <summary>将 5 个字段组合成一行 CSV。</summary>
+        private static string MakeRow(string colA, string colB, string colC, string colD, string colE)
+        {
+            return $"{EscapeCsv(colA)},{EscapeCsv(colB)},{EscapeCsv(colC)},{EscapeCsv(colD)},{EscapeCsv(colE)}";
+        }
+
+        /// <summary>从头部行中提取指定标签后的值。</summary>
+        private static string ParseHeaderLine(string line, string label)
+        {
+            int idx = line.IndexOf(label, StringComparison.Ordinal);
+            if (idx < 0) return "";
+            return line.Substring(idx + label.Length).Trim();
+        }
+
+        /// <summary>检测文件编码，支持 UTF-8 BOM / UTF-16 LE BOM / ANSI。</summary>
+        private static System.Text.Encoding DetectEncoding(string filePath)
+        {
+            byte[] bytes = System.IO.File.ReadAllBytes(filePath);
+            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+                return new System.Text.UTF8Encoding(true);
+            if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+                return System.Text.Encoding.Unicode; // UTF-16 LE
+            if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+                return System.Text.Encoding.BigEndianUnicode; // UTF-16 BE
+            return System.Text.Encoding.Default;
+        }
+
+        /// <summary>CSV 字段转义：处理逗号、双引号和换行符。</summary>
         private static string EscapeCsv(string field)
         {
             if (string.IsNullOrEmpty(field)) return "";
@@ -741,7 +803,7 @@ namespace OpcDaToUaGateway
                     {
                         ItemId = item.ItemId,
                         DisplayName = item.Name,
-                        DataType = item.DataTypeName ?? "Variant"
+                        DataType = item.DataTypeName ?? AppConstants.UnknownDataType
                     });
                 }
             }

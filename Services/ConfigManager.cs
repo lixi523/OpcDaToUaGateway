@@ -1,8 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Security.Cryptography;
 using System.Windows.Forms;
 using Newtonsoft.Json;
 using OpcDaToUaGateway.Models;
@@ -66,6 +67,80 @@ namespace OpcDaToUaGateway.Services
         /// H-40: 配置文件被外部修改时触发。MainForm 订阅后根据网关状态决定自动重载或提示。
         /// </summary>
         public event Action ConfigFileChanged;
+
+        // S-3 修复：授权码加密存储的 AES 密钥，由 LicenseAlgorithm.DeriveKey() 派生
+        private static readonly byte[] _authCodeKey = LicenseAlgorithm.GetEncryptionKey();
+
+        /// <summary>
+        /// 使用 AES-256-CBC 加密授权码。加密结果包含随机 IV（前 16 字节）+ 密文，整体 Base64 编码。
+        /// </summary>
+        private static string EncryptAuthCode(string plaintext)
+        {
+            if (string.IsNullOrEmpty(plaintext)) return plaintext;
+
+            try
+            {
+                using (var aes = Aes.Create())
+                {
+                    aes.Key = _authCodeKey;
+                    aes.GenerateIV();
+
+                    using (var encryptor = aes.CreateEncryptor())
+                    using (var ms = new MemoryStream())
+                    {
+                        // 先写入 IV，解密时从中提取
+                        ms.Write(aes.IV, 0, aes.IV.Length);
+                        using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
+                        using (var sw = new StreamWriter(cs))
+                        {
+                            sw.Write(plaintext);
+                        }
+                        return Convert.ToBase64String(ms.ToArray());
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[配置] 授权码加密失败: {ex.Message}");
+                return plaintext;
+            }
+        }
+
+        /// <summary>
+        /// 解密配置文件中加密存储的授权码。
+        /// 向后兼容：如果字符串不是有效的 Base64 或解密失败，视为明文返回。
+        /// </summary>
+        private static string DecryptAuthCode(string encrypted)
+        {
+            if (string.IsNullOrEmpty(encrypted)) return encrypted;
+
+            try
+            {
+                byte[] fullData = Convert.FromBase64String(encrypted);
+                if (fullData.Length <= 16) return encrypted; // 太短，不可能是有效的加密数据
+
+                using (var aes = Aes.Create())
+                {
+                    aes.Key = _authCodeKey;
+                    byte[] iv = new byte[16];
+                    Array.Copy(fullData, 0, iv, 0, 16);
+                    aes.IV = iv;
+
+                    using (var decryptor = aes.CreateDecryptor())
+                    using (var ms = new MemoryStream(fullData, 16, fullData.Length - 16))
+                    using (var cs = new CryptoStream(ms, decryptor, CryptoStreamMode.Read))
+                    using (var sr = new StreamReader(cs))
+                    {
+                        return sr.ReadToEnd();
+                    }
+                }
+            }
+            catch
+            {
+                // 向后兼容：解密失败时视为明文（旧版本配置）
+                return encrypted;
+            }
+        }
 
         /// <summary>
         /// 初始化配置管理器。
@@ -144,6 +219,17 @@ namespace OpcDaToUaGateway.Services
                     _log?.Append("[配置] 已为新标签分配 TagKey 并持久化");
                 }
 
+                // S-3 修复：解密配置文件中的授权码
+                if (!string.IsNullOrEmpty(Config.AuthorizationCode))
+                {
+                    string decrypted = DecryptAuthCode(Config.AuthorizationCode);
+                    if (decrypted != Config.AuthorizationCode)
+                    {
+                        _log?.Append("[配置] 已解密授权码");
+                        Config.AuthorizationCode = decrypted;
+                    }
+                }
+
                 // H-40: 启动配置文件监视
                 StartWatching();
 
@@ -179,7 +265,7 @@ namespace OpcDaToUaGateway.Services
 
             // 监听地址默认 localhost — 仅本机可连接，安全性较好
             if (string.IsNullOrEmpty(ua.ListenAddress))
-                ua.ListenAddress = "localhost";
+                ua.ListenAddress = AppConstants.DefaultDaHost;
 
             // 安全模式和策略默认 None — 简化初始配置，用户可按需启用加密
             if (string.IsNullOrEmpty(ua.SecurityMode))
@@ -270,7 +356,18 @@ namespace OpcDaToUaGateway.Services
                 // 取消待执行的防抖写入，防止 Timer 回调与本次立即写入并发执行 DoSave
                 _debounceTimer?.Dispose();
                 _debounceTimer = null;
-                DoSave();
+                DoSaveCore();
+            }
+        }
+
+        public bool TrySaveImmediate()
+        {
+            if (Config == null) return false;
+            lock (_saveLock)
+            {
+                _debounceTimer?.Dispose();
+                _debounceTimer = null;
+                return DoSaveCore();
             }
         }
 
@@ -295,11 +392,14 @@ namespace OpcDaToUaGateway.Services
         ///   3. 用 File.Replace 原子替换目标文件（不存在时 File.Move）
         ///   tags.json 由 SaveTagsImmediate 单独写入（不在 DoSave 中，避免全量序列化）
         /// </summary>
-        private void DoSave()
+        /// <summary>
+        /// 执行实际的配置序列化与文件写入（必须由调用者持有 _saveLock 锁）。
+        /// Timer 回调路径通过 <see cref="DoSave"/> 获取锁后调用此方法，
+        /// SaveImmediate 路径已持有锁，直接调用此方法。
+        /// </summary>
+        private bool DoSaveCore()
         {
-            if (Config == null) return;
-
-            Monitor.Enter(_saveLock);
+            if (Config == null) return false;
 
             // R-8 修复：在 try 外部保存 Tags 原始引用，确保 finally 块能访问它。
             // 如果序列化阶段抛出异常，finally 会恢复原始引用而非创建空列表，
@@ -313,8 +413,16 @@ namespace OpcDaToUaGateway.Services
                 // 标签数据由 SaveTagsImmediate() 单独写入 tags.json。
                 if (Config.OpcDa != null) Config.OpcDa.Tags = null;
 
+                // S-3 修复：序列化前加密授权码，防止明文存储
+                string originalAuthCode = Config.AuthorizationCode;
+                if (!string.IsNullOrEmpty(Config.AuthorizationCode))
+                    Config.AuthorizationCode = EncryptAuthCode(Config.AuthorizationCode);
+
                 // 序列化网关配置快照（不含 Tags，约 2KB，远小于全量 8-10MB）
                 string configJson = JsonConvert.SerializeObject(Config, Formatting.Indented);
+
+                // 恢复明文授权码（内存中仍保持明文，方便 UI 读取）
+                Config.AuthorizationCode = originalAuthCode;
 
                 // 恢复 Tags 引用（正常路径）
                 if (Config.OpcDa != null) Config.OpcDa.Tags = tags;
@@ -326,16 +434,45 @@ namespace OpcDaToUaGateway.Services
                     File.Replace(tempPath, configPath, null);
                 else
                     File.Move(tempPath, configPath);
+
+                return true;
             }
             catch (Exception ex)
             {
                 _log.Append($"保存配置失败: {ex.Message}");
+                return false;
             }
             finally
             {
                 // R-8 修复：序列化异常时 Tags 可能为 null，恢复原始引用而非空列表
                 if (Config?.OpcDa != null && Config.OpcDa.Tags == null)
                     Config.OpcDa.Tags = tags;
+            }
+        }
+
+        /// <summary>
+        /// 由 Timer 防抖回调调用的入口，获取锁后委托给 <see cref="DoSaveCore"/>。
+        /// 
+        /// 为什么使用 Monitor.TryEnter 而非 lock 语句：
+        ///   此方法可能被 Timer 回调线程调用（Save 的防抖触发），超时 10 秒后返回 false 而非永久阻塞。
+        ///   lock 语句无法指定超时，因此显式使用 Monitor.Enter/Exit。
+        /// </summary>
+        private void DoSave()
+        {
+            if (Config == null) return;
+
+            if (!Monitor.TryEnter(_saveLock, 10000))
+            {
+                _log?.Append("[配置] 无法获取保存锁（10s 超时），跳过本次写入");
+                return;
+            }
+
+            try
+            {
+                DoSaveCore();
+            }
+            finally
+            {
                 Monitor.Exit(_saveLock);
             }
         }
@@ -391,97 +528,6 @@ namespace OpcDaToUaGateway.Services
             }
             SaveImmediate();
             _log.Append($"已保存服务器 ProgId: {progId}");
-        }
-
-        /// <summary>
-        /// 设置或取消 Windows 开机自动启动。
-        /// 通过在"启动"文件夹中创建/删除 .lnk 快捷方式实现。
-        /// </summary>
-        /// <param name="enable">true 添加开机启动；false 移除</param>
-        public void SetAutoStart(bool enable)
-        {
-            try
-            {
-                if (enable)
-                {
-                    CreateStartupShortcut();
-                    _log.Append("[开机启动] 已添加开机启动快捷方式");
-                }
-                else
-                {
-                    RemoveAutoStartShortcut();
-                    _log.Append("[开机启动] 已移除开机启动快捷方式");
-                }
-            }
-            catch (Exception ex)
-            {
-                _log.Append($"[开机启动] 设置失败: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// 在 Windows "启动"文件夹中创建 .lnk 快捷方式，实现开机自启动。
-        ///
-        /// 实现方式：通过 COM 互操作调用 WScript.Shell 的 CreateShortcut 方法。
-        /// 由于 WScript.Shell 是 late-bound（无类型库引用），使用反射调用 COM 成员。
-        /// finally 块中通过 Marshal.ReleaseComObject 显式释放 COM 对象，防止引用泄漏。
-        /// 快捷方式参数包含 --minimized，使程序启动时最小化到系统托盘。
-        /// </summary>
-        private void CreateStartupShortcut()
-        {
-            string shortcutPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-                "OpcDaToUaGateway.lnk");
-
-            string exePath = Application.ExecutablePath;
-
-            Type shellType = Type.GetTypeFromProgID("WScript.Shell");
-            object shell = Activator.CreateInstance(shellType);
-            object shortcut = null;
-            try
-            {
-                shortcut = shellType.InvokeMember("CreateShortcut",
-                    System.Reflection.BindingFlags.InvokeMethod, null, shell,
-                    new object[] { shortcutPath });
-
-                Type scType = shortcut.GetType();
-                scType.InvokeMember("TargetPath",
-                    System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { exePath });
-                scType.InvokeMember("Arguments",
-                    System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { "--minimized" });
-                scType.InvokeMember("WorkingDirectory",
-                    System.Reflection.BindingFlags.SetProperty, null, shortcut,
-                    new object[] { Path.GetDirectoryName(exePath) });
-                // WindowStyle = 1 表示正常窗口（非最小化/最大化）
-                scType.InvokeMember("WindowStyle",
-                    System.Reflection.BindingFlags.SetProperty, null, shortcut, new object[] { 1 });
-                scType.InvokeMember("Description",
-                    System.Reflection.BindingFlags.SetProperty, null, shortcut,
-                    new object[] { "OPC DA to OPC UA Gateway" });
-                scType.InvokeMember("Save",
-                    System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
-            }
-            finally
-            {
-                // 显式释放 COM 对象：.NET GC 不保证及时回收 COM 引用，
-                // 手动 ReleaseComObject 防止 WScript.Shell 进程残留
-                if (shortcut != null) Marshal.ReleaseComObject(shortcut);
-                if (shell != null) Marshal.ReleaseComObject(shell);
-            }
-        }
-
-        /// <summary>
-        /// 删除"启动"文件夹中的 .lnk 快捷方式，取消开机自启动。
-        /// 文件不存在时静默返回（幂等操作）。
-        /// </summary>
-        private void RemoveAutoStartShortcut()
-        {
-            string shortcutPath = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-                "OpcDaToUaGateway.lnk");
-
-            if (File.Exists(shortcutPath))
-                File.Delete(shortcutPath);
         }
 
         /// <summary>

@@ -15,12 +15,15 @@ namespace OpcDaToUaGateway.Services
         private readonly LogManager _log;
         private readonly ConfigManager _configMgr;
         private readonly Action _requestGatewayStop;
+        private readonly TrialStateStore _trialStateStore;
         private readonly string _pcid;
 
         private bool _isLicensed;
         private bool _trialExpired;
         private Stopwatch _trialStopwatch;
         private Timer _licenseTimer;
+        private long _persistedTrialSeconds;
+        private long _lastSavedTrialSeconds;
 
         /// <summary>授权状态变化（已授权/试用中/试用到期）。</summary>
         public event Action<string, Color> StatusChanged;
@@ -38,10 +41,16 @@ namespace OpcDaToUaGateway.Services
         public string PCID => _pcid;
 
         public LicenseManager(LogManager log, ConfigManager configMgr, Action requestGatewayStop)
+            : this(log, configMgr, requestGatewayStop, new TrialStateStore())
+        {
+        }
+
+        internal LicenseManager(LogManager log, ConfigManager configMgr, Action requestGatewayStop, TrialStateStore trialStateStore)
         {
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _configMgr = configMgr ?? throw new ArgumentNullException(nameof(configMgr));
             _requestGatewayStop = requestGatewayStop;
+            _trialStateStore = trialStateStore ?? throw new ArgumentNullException(nameof(trialStateStore));
 
             try { _pcid = LicenseAlgorithm.GeneratePCID(); }
             catch { _pcid = "UNKNOWN"; }
@@ -79,8 +88,21 @@ namespace OpcDaToUaGateway.Services
 
         private void StartTrialTimer()
         {
+            TrialStateLoadResult loadResult = _trialStateStore.Initialize(out _persistedTrialSeconds);
+            if (loadResult == TrialStateLoadResult.Invalid)
+            {
+                _persistedTrialSeconds = (long)TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes).TotalSeconds;
+                _log.Append("[授权] 试用状态文件无效，按试用到期处理");
+            }
+
+            _lastSavedTrialSeconds = _persistedTrialSeconds;
             _trialStopwatch = Stopwatch.StartNew();
             _trialExpired = false;
+            if (GetRemainingTrialTime() == TimeSpan.Zero)
+            {
+                ExpireTrial("[授权] 试用期已到，网关不可启动");
+                return;
+            }
 
             _licenseTimer = new Timer { Interval = 1000 };
             _licenseTimer.Tick += LicenseTimer_Tick;
@@ -92,15 +114,18 @@ namespace OpcDaToUaGateway.Services
 
         private void LicenseTimer_Tick(object sender, EventArgs e)
         {
-            TimeSpan remaining = TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes) - _trialStopwatch.Elapsed;
-
-            if (remaining.TotalSeconds <= 0)
+            TimeSpan remaining = GetRemainingTrialTime();
+            long elapsedSeconds = GetCurrentElapsedSeconds();
+            if (elapsedSeconds - _lastSavedTrialSeconds >= 60 && !TrySaveTrialState(elapsedSeconds))
             {
-                _licenseTimer?.Stop();
-                _trialExpired = true;
-                StatusChanged?.Invoke("● 授权: 试用到期", Color.Red);
-                _log.Append("[授权] ★★★ 试用期已到，网关将自动关闭 ★★★");
-                GatewayStopRequested?.Invoke();
+                ExpireTrial("[授权] 保存试用累计时间失败，按试用到期处理");
+                return;
+            }
+
+            if (remaining == TimeSpan.Zero)
+            {
+                TrySaveTrialState((long)TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes).TotalSeconds);
+                ExpireTrial("[授权] ★★★ 试用期已到，网关将自动关闭 ★★★");
                 return;
             }
 
@@ -110,15 +135,55 @@ namespace OpcDaToUaGateway.Services
         private void UpdateTrialStatus(TimeSpan? remaining = null)
         {
             if (remaining == null)
-                remaining = TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes) - _trialStopwatch.Elapsed;
+                remaining = GetRemainingTrialTime();
 
-            int totalSeconds = (int)remaining.Value.TotalSeconds;
+            int totalSeconds = Math.Max(0, (int)remaining.Value.TotalSeconds);
             string text = $"● 试用: {totalSeconds / 60:D2}:{totalSeconds % 60:D2}";
             Color color = remaining.Value.TotalMinutes <= 5 ? Color.Red
                        : remaining.Value.TotalMinutes <= 10 ? Color.Orange
                        : Color.DarkOrange;
 
             StatusChanged?.Invoke(text, color);
+        }
+
+        internal static long GetElapsedSeconds(long persistedSeconds, TimeSpan currentRuntime)
+        {
+            long safePersisted = Math.Max(0, persistedSeconds);
+            long runtimeSeconds = Math.Max(0, (long)currentRuntime.TotalSeconds);
+            return safePersisted + runtimeSeconds;
+        }
+
+        internal static TimeSpan GetRemaining(long persistedSeconds, TimeSpan currentRuntime, TimeSpan trialPeriod)
+        {
+            long remainingSeconds = (long)trialPeriod.TotalSeconds - GetElapsedSeconds(persistedSeconds, currentRuntime);
+            return remainingSeconds > 0 ? TimeSpan.FromSeconds(remainingSeconds) : TimeSpan.Zero;
+        }
+
+        private long GetCurrentElapsedSeconds()
+            => GetElapsedSeconds(_persistedTrialSeconds, _trialStopwatch?.Elapsed ?? TimeSpan.Zero);
+
+        private TimeSpan GetRemainingTrialTime()
+            => GetRemaining(_persistedTrialSeconds, _trialStopwatch?.Elapsed ?? TimeSpan.Zero,
+                TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes));
+
+        private bool TrySaveTrialState(long elapsedSeconds)
+        {
+            if (!_trialStateStore.TrySave(elapsedSeconds))
+                return false;
+
+            _lastSavedTrialSeconds = elapsedSeconds;
+            return true;
+        }
+
+        private void ExpireTrial(string logMessage)
+        {
+            if (_trialExpired) return;
+
+            _trialExpired = true;
+            _licenseTimer?.Stop();
+            StatusChanged?.Invoke("● 授权: 试用到期", Color.Red);
+            _log.Append(logMessage);
+            GatewayStopRequested?.Invoke();
         }
 
         /// <summary>
@@ -130,14 +195,26 @@ namespace OpcDaToUaGateway.Services
         {
             if (LicenseAlgorithm.VerifyAuthCode(_pcid, authCode))
             {
+                if (!TrySaveTrialState(GetCurrentElapsedSeconds()))
+                {
+                    _log.Append("[授权] 保存试用累计时间失败，授权未应用");
+                    return false;
+                }
+
+                _configMgr.Config.AuthorizationCode = authCode;
+                if (!_configMgr.TrySaveImmediate())
+                {
+                    _configMgr.Config.AuthorizationCode = null;
+                    _isLicensed = false;
+                    _log.Append("[授权] 授权码保存失败，授权未应用");
+                    return false;
+                }
+
                 _isLicensed = true;
                 _trialExpired = false;
                 _licenseTimer?.Stop();
                 _licenseTimer?.Dispose();
                 _licenseTimer = null;
-
-                _configMgr.Config.AuthorizationCode = authCode;
-                _configMgr.Save();
 
                 StatusChanged?.Invoke("● 授权: 已授权", Color.Green);
                 _log.Append("[授权] ★ 授权码验证成功，软件已授权 ★");
@@ -152,6 +229,9 @@ namespace OpcDaToUaGateway.Services
 
         public void Dispose()
         {
+            if (!_isLicensed && _trialStopwatch != null && !TrySaveTrialState(GetCurrentElapsedSeconds()))
+                _log.Append("[授权] 退出时保存试用累计时间失败");
+
             _licenseTimer?.Stop();
             _licenseTimer?.Dispose();
             _licenseTimer = null;

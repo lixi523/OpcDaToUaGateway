@@ -627,7 +627,7 @@ namespace OpcDaToUaGateway
 
                 var securityPolicies = new ServerSecurityPolicyCollection();
 
-                // P4 修复：仅当用户选择 None 时才添加无加密策略。
+                // 仅当用户选择 None 时才添加无加密策略。
                 // 非 None 模式下添加对应的安全策略（如 Sign / SignAndEncrypt），
                 // 避免无意中暴露无加密端口。
                 if (secMode == MessageSecurityMode.None)
@@ -650,13 +650,13 @@ namespace OpcDaToUaGateway
 
                 string endpointUrl = $"opc.tcp://{listenAddress}:{port}/{serverName}";
 
-                // P4 修复：证书 SubjectName 使用实际监听地址而非硬编码 localhost。
+                // 证书 SubjectName 使用实际监听地址而非硬编码 localhost。
                 // 当监听 0.0.0.0 时使用机器名，否则使用实际绑定地址。
                 string certHost = listenAddress == "0.0.0.0"
                     ? Environment.MachineName
                     : listenAddress;
 
-                // H2 修复：ApplicationUri/ProductUri 使用实际主机名，而非硬编码 localhost。
+                // ApplicationUri/ProductUri 使用实际主机名，而非硬编码 localhost。
                 // UA 客户端在验证服务器证书时会比对 ApplicationUri 中的主机名。
                 string uriHost = listenAddress == "0.0.0.0"
                     ? Environment.MachineName
@@ -826,6 +826,9 @@ namespace OpcDaToUaGateway
         /// </summary>
         public async Task StopAsync()
         {
+            // M-05 修复：在 Dispose 过程中 _server 可能已被置 null，直接跳过
+            if (_disposedInt == 1) return;
+
             try
             {
                 if (_server != null)

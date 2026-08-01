@@ -20,7 +20,7 @@ namespace OpcDaToUaGateway.Models
         // 网关
         public bool IsRunning { get; set; }
         public bool DaConnected { get; set; }
-        public int TotalUpdates { get; set; }
+        public long TotalUpdates { get; set; }
         public double UpdateRatePerSec { get; set; }
         public int ErrorCount { get; set; }
         public string LastUpdateTime { get; set; }

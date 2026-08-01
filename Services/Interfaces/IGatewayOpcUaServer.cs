@@ -53,7 +53,14 @@ namespace OpcDaToUaGateway.Services.Interfaces
         /// <summary>异步停止 UA 服务器。Dispose 内部使用 Task.Run 包装避免 UI 线程 SynchronizationContext 死锁（C-06 修复）。</summary>
         Task StopAsync();
 
+
         /// <summary>注册一个变量节点到 UA 地址空间。tagKey 在同一实例内必须唯一。</summary>
         void AddVariableNode(string tagKey, string itemId, string displayName, BuiltInType dataType, string nodeId = null);
+
+        /// <summary>
+        /// 更新变量节点的值。由 DataBridge 在 DA 数据变化回调中调用。
+        /// isGood=false 时值可为 null，表示 Bad Quality。
+        /// </summary>
+        void UpdateValue(string tagKey, object value, bool isGood, DateTime sourceTimestamp);
     }
 }

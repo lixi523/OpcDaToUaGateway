@@ -1,8 +1,8 @@
-# OPC DA → OPC UA 网关（OpcDaToUaGateway）
+﻿# OPC DA → OPC UA 网关（OpcDaToUaGateway）
 
 ![Build](https://github.com/lixi523/OpcDaToUaGateway/actions/workflows/build.yml/badge.svg)
 
-> 版本：**V2.0.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
+> 版本：**V2.4.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
 
 ---
 
@@ -102,7 +102,8 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
-| **V2.0.0** | 2026-07-21 | **DA 标签真实数据类型获取**：浏览阶段通过临时 OPC DA Group 调用 `AddItems`，从 `OpcDaItem.CanonicalDataType` 提取实际数据类型（Integer、Float、Boolean 等），替代原有的固定 "Variant" 描述；分批处理（每批 500 个点位），失败时静默回退不影响浏览结果。版本号 1.5.0 → 2.0.0。编译 0 警告 0 错误。 |
+| **V2.4.0** | 2026-08-01 | **安全增强与稳定性优化**：授权码加密存储；试用累计运行时间使用 Windows DPAPI 持久化到 `%ProgramData%\OpcDaToUaGateway\trial.dat`，重启不再重置；自动启动收敛为单一 WinForms Timer 并在 UI 线程执行；OPC DA 同步采集重连后保持 Sync 模式；同步读取增加单读取门禁，停止或重连时等待在途 Read 结束后再释放 COM 资源；同时包含锁策略、定时器、日志、SafeInvoke、FormClosing、AutoStartManager 和 BuildUI 等质量优化。当前测试 66/66 通过，Debug/Release 构建均为 0 警告、0 错误。
+| **V2.2.0** | 2026-07-23 | **全面代码审查修复**：① String 类型标签在 DA 浏览时数据类型显示错误（`ExtractDataType`/`FillRealDataTypes` 中 `!= "String"` 排除条件移除）；② `ItemSelectionDialog` 独立 CSV 导出格式与 `CsvTagExporter` 统一为 5 列格式（表头 `序号,ItemId,名称,数据类型,描述`，头部 `#修改C3`，空行 `,,,,`）；③ MainForm 图标加载路径改为 `opc-da-opc-ua.ico`；④ `ConfigManager` FileSystemWatcher debounce Timer 泄漏修复（提升为字段 + `Interlocked.Exchange`）；⑤ `FillRealDataTypes` 临时 Group 添加 UpdateRate；⑥ `GatewayOpcUaServer.StopAsync()` 添加 `_disposedInt` 守卫；⑦ `HealthSnapshot` 空 catch 替换为 Debug.WriteLine；⑧ Watchdog 重启传递 `--minimized` 参数；⑨ `DataBridge.Start()` 标记 `[Obsolete]`。编译 0 警告 0 错误。 || **V2.0.0** | 2026-07-21 | **DA 标签真实数据类型获取**：浏览阶段通过临时 OPC DA Group 调用 `AddItems`，从 `OpcDaItem.CanonicalDataType` 提取实际数据类型（Integer、Float、Boolean 等），替代原有的固定 "Variant" 描述；分批处理（每批 500 个点位），失败时静默回退不影响浏览结果。版本号 1.5.0 → 2.0.0。编译 0 警告 0 错误。 |
 | V1.9.0 | 2026-07-20 | **全面代码审查 + 启动卡顿最终修复 + DA模式切换**：① DataBridge.StartAsync 异步启动（`Task.Run` 后台线程创建节点 + SynchronizationContext.Post 进度回调），3.5 万节点场景窗口保持响应；② 新增 DA 数据获取方式选择（异步订阅/同步轮询），UI 下拉框 + 配置持久化；③ 首次运行默认填充 ProgId `Matrikon.OPC.Simulation.1`，开箱即用；④ 未选择服务器时禁用「获取点位」「启动网关」按钮；⑤ Boolean 类型转换增强（支持字符串 "true"/"1"/"yes" 等）；⑥ SourceTimestamp 单调递增修复（bool 翻转标签可被 UA 客户端正确检测）；⑦ Dispose 后重连检查、Monitor.Exit 安全检查、SafeInvoke 句柄防护；⑧ ConfigManager 实现 IDisposable；⑨ 版本号 1.5.0 → 1.9.0；⑩ 删除 PLAN.md（文档整合完成）。编译 0 警告 0 错误。 |
 | V1.8.1 | 2026-07-17 | **启动卡顿最终修复**：3.5 万次 `AddVariableNode` 移至后台线程（`Task.Run`），UI 线程通过 `SynchronizationContext.Post` 安全输出进度日志。真实环境验证窗口保持响应。 |
 | V1.8.0 | 2026-07-16 | 移除 V1.7.0 新增的「已连接客户端」列表功能；修复启动窗口「未响应」卡顿根因（逐节点 `Diag()` 导致 O(n²) 日志洪泛）。编译 0 警告 0 错误。 |
@@ -133,4 +134,4 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 ---
 
-*本文档基于 V2.0.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
+*本文档基于 V2.4.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*

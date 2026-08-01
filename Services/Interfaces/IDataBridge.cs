@@ -21,7 +21,7 @@ namespace OpcDaToUaGateway.Services.Interfaces
     public interface IDataBridge : IDisposable
     {
         /// <summary>累计成功更新次数（线程安全读取）。</summary>
-        int TotalUpdates { get; }
+        long TotalUpdates { get; }
 
         /// <summary>累计错误次数（线程安全读取）。</summary>
         int ErrorCount { get; }

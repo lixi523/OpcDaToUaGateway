@@ -1,7 +1,7 @@
 ﻿# OPC_DA转UA网关 — 项目状态报告
 
-**生成时间：** 2026-07-17 17:20  
-**当前版本：** V2.0.0  
+**生成时间：** 2026-07-23 17:00
+**当前版本：** V2.4.0
 **编译状态：** 0 警告 0 错误 ✅
 
 ---
@@ -10,7 +10,7 @@
 
 对 OpcDaToUaGateway 项目进行代码瘦身与结构优化（ponytail 8 项），消除过度工程、冗余代码，提升可维护性。
 
-**状态：全部执行完毕，编译通过，版本号已升级到 1.5.0。**
+**状态：全部执行完毕，编译通过，版本号已升级到 V2.4.0。**
 
 > **版本演进（自 V1.5.0 起，详见 handoff.md / 开发指南版本历史）：**
 > - **V1.5.1**（本会话）：修复 `RunningStateChanged` 跨线程异常（`SafeInvoke` 封送缺失）、`SafeInvoke` 缺句柄防护、删除 `LicenseManager` 死代码 `_requestGatewayStop`；编译 0 警告 0 错误。
@@ -24,11 +24,36 @@
 > - **V1.8.0（2026-07-16）**：升级版本号至 1.8.0（三个 `.csproj` 统一）。移除 V1.7.0 新增的「已连接客户端」列表功能——删除 `MainForm` 客户端列表控件与 `RefreshConnectedClients()` 定时刷新逻辑、`GatewayOpcUaServer.GetConnectedClients()` 及 `GatewayServer.ServerInternalAccess` 属性、`IGatewayOpcUaServer.GetConnectedClients()` 接口声明；OPC UA 设置区布局恢复紧凑。**启动卡顿修复：** 启动网关后窗口「未响应」已定位并修复。根因为 `GatewayNodeManager.AddVariableNode` 在每次创建变量节点时调用 `Diag()`，经 `OnStatusChanged`→`_log.Append`→`BeginInvoke` 向 UI 线程投递数万次日志更新（`LogManager.UpdateTextBox` 每次 O(文本长度)、累计 O(n²)），3.5 万节点场景导致约 7 分钟卡死；该 `Diag` 路径独立于 `DataBridge` 已节流的 `Log`，此前排查时未被覆盖。已移除该逐节点诊断调用，节点创建仍走 O(1) 的 `AddPredefinedNode`（经反编译 `Opc.Ua.Server.dll` 1.5.378.145 确认其仅做 `PredefinedNodes` 字典注册，无逐节点通知/地址空间重建）；`DataBridge.Start()` 进度日志维持每 ~5% 节流。编译 0 警告 0 错误。
 
 - **V2.0.0（2026-07-21）**：升级版本号至 V2.0.0（三个 `.csproj` 同步）。**DA 标签真实数据类型获取**：浏览阶段通过临时 OPC DA Group 调用 AddItems，从 OpcDaItem.CanonicalDataType 提取实际数据类型（Integer、Float、Boolean 等），替代原有的固定 Variant 描述；分批处理（每批 500 个点位），失败时静默回退。编译 0 警告 0 错误。
+> - **V2.2.0（2026-07-24）**：全面代码审查修复——String 类型标签显示修复、CSV 6 列格式统一、按钮导航移除、接口抽象与单元测试（14/14 通过）；编译 0 警告 0 错误。
+> - **V2.3.0（2026-07-26）**：安全增强与代码质量优化——授权码 AES-256-CBC 加密存储、OnValuesChanged _disposedInt 防护、ConvertValue 日志告警、ConfigManager 锁策略拆分、定时器泄漏修复、SafeInvoke 死锁修复、TryReconnect 竞态修复、FormClosing 简化、AutoStartManager 分离、BuildUI 拆分为 9 子方法、xUnit1031 警告修复、HealthSnapshot 缓存 Process、常量统一、去除冗余注释；编译 0 错误 0 警告，测试 56/56 通过。
+> - **V2.4.0（2026-08-01）**：试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 UI Timer；Sync 模式重连保持；同步 Read 增加重入门禁与 COM 安全释放；清理 `_gridTags` 既有警告；三个项目版本统一为 2.4.0；Debug/Release 0 警告 0 错误，测试 66/66 通过。
 - **V1.9.0（2026-07-20）**：升级版本号至 V1.9.0（三个 `.csproj` 同步）。**全面代码审查 + 启动卡顿最终修复 + DA模式切换**：① DataBridge.StartAsync 异步启动（Task.Run 后台线程创建节点 + SynchronizationContext.Post 进度回调），3.5 万节点场景窗口保持响应；② 新增 DA 数据获取方式选择（异步订阅/同步轮询），UI 下拉框 + 配置持久化；③ 首次运行默认填充 ProgId Matrikon.OPC.Simulation.1，开箱即用；④ 未选择服务器时禁用「获取点位」「启动网关」按钮；⑤ Boolean 类型转换增强；⑥ SourceTimestamp 单调递增修复；⑦ Dispose 后重连检查、Monitor.Exit 安全检查、SafeInvoke 句柄防护；⑧ ConfigManager 实现 IDisposable；⑨ 版本号 1.5.0 → 1.9.0；⑩ 删除 PLAN.md。编译 0 警告 0 错误。
 
 ---
 
 ## 2. 已经完成的修改
+
+### V2.4.0 安全增强与稳定性优化（2026-08-01）
+
+| 操作 | 净减 |
+|---|---|
+| 授权码 AES-256-CBC 加密存储 | 新增 EncryptAuthCode/DecryptAuthCode + GetEncryptionKey |
+| OnValuesChanged _disposedInt 防护 | +3 行 |
+| ConvertValue 空 catch 日志 | +3 行 |
+| ConfigManager 锁策略拆分 | 重构 DoSave → DoSaveCore/DoSave |
+| WatchdogManager 定时器泄漏修复 | +2 行 |
+| LogManager 文件重建降级 | +3 行 |
+| SafeInvoke BeginInvoke 死锁修复 | 1 字符修改 |
+| TryReconnect 竞态修复 | 重构 ~30 行 |
+| FormClosing 标志位简化 | 移除 2 个标志位 |
+| AutoStartManager 分离 | 新建 ~80 行，ConfigManager 减 ~70 行 |
+| MainForm BuildUI 拆分 9 子方法 | 从 597 行 → 9 个方法 |
+| 修复 xUnit1031 警告 | 3 处 Task.WaitAll → await Task.WhenAll |
+| HealthSnapshot 缓存 Process | +5 行 |
+| 硬编码字符串常量统一 | 替换 ~15 处 |
+| 去除冗余修复注释 | 清理 12 个文件 |
+| **编译验证** | **0 错误 0 警告** |
+| **单元测试** | **56/56 通过** |
 
 ### ponytail-review（过度工程清理）
 

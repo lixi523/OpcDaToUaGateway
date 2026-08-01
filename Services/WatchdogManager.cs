@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -210,6 +210,8 @@ namespace OpcDaToUaGateway.Services
                     {
                         // 名称冲突（极端罕见，如操作系统级命名空间冲突），
                         // 不重试以避免无限循环，仅记录日志。心跳功能降级但看门狗仍可通过进程检测工作。
+                        _heartbeatTimer?.Dispose();
+                        _heartbeatTimer = null;
                         _log.Append("[守护] 心跳事件名称冲突，心跳监控不可用");
                     }
 
@@ -218,7 +220,7 @@ namespace OpcDaToUaGateway.Services
                     // 回调中的异常被吞掉，因为定时器回调崩溃会导致整个进程终止。
                     _heartbeatTimer = new System.Threading.Timer(_ =>
                     {
-                        // H-37: 心跳异常记录到独立文件，确保主日志系统崩溃时也能留下痕迹
+                        // 心跳异常记录到独立文件，确保主日志系统崩溃时也能留下痕迹
                         try { _heartbeatEvent?.Set(); }
                         catch (Exception ex)
                         {
@@ -229,7 +231,7 @@ namespace OpcDaToUaGateway.Services
                                 System.IO.File.AppendAllText(errPath,
                                     $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 心跳 Set 失败: {ex.GetType().Name}: {ex.Message}\r\n");
                             }
-                            catch { }
+                catch (Exception ex2) { _log.Append($"[看门狗] 注册事件失败: {ex2.Message}"); }
                         }
                     }, null, 0, HeartbeatIntervalMs);
 
@@ -244,7 +246,7 @@ namespace OpcDaToUaGateway.Services
                             exitOk.Reset();
                         }
                     }
-                    catch { }
+catch (Exception ex) { _log.Append($"[看门狗] 进程监控失败: {ex.Message}"); }
 
                     StatusChanged?.Invoke("● 守护: 运行中", System.Drawing.Color.Green);
                     _log.Append("[守护] 看门狗进程已启动");
@@ -281,9 +283,9 @@ namespace OpcDaToUaGateway.Services
             {
                 // 第一步：先停止心跳，因为主进程即将退出，继续发送心跳没有意义，
                 // 且可能在事件句柄被释放后导致定时器回调异常。
-                try { _heartbeatTimer?.Dispose(); } catch { }
+try { _heartbeatTimer?.Dispose(); } catch (Exception ex) { _log.Append($"[看门狗] 释放心跳定时器失败: {ex.Message}"); }
                 _heartbeatTimer = null;
-                try { _heartbeatEvent?.Dispose(); } catch { }
+try { _heartbeatEvent?.Dispose(); } catch (Exception ex) { _log.Append($"[看门狗] 释放心跳事件失败: {ex.Message}"); }
                 _heartbeatEvent = null;
 
                 // 第二步：通过命名事件通知看门狗退出（优雅方式）。
@@ -295,7 +297,7 @@ namespace OpcDaToUaGateway.Services
                         stopEvent.Set();
                     }
                 }
-                catch { }
+catch (Exception ex) { _log.Append($"[看门狗] 启动看门狗失败: {ex.Message}"); }
 
                 // 第三步：等待看门狗自行退出。
                 // 看门狗检测到 StopEvent 后会退出循环，通常需要几十毫秒。
@@ -307,7 +309,7 @@ namespace OpcDaToUaGateway.Services
                         if (!_process.HasExited)
                             _process.WaitForExit(3000);
                     }
-                    catch { }
+catch (Exception ex) { _log.Append($"[看门狗] 重启进程失败: {ex.Message}"); }
                 }
 
                 // 第四步：兜底 — 强制终止所有残留实例。
@@ -360,9 +362,9 @@ namespace OpcDaToUaGateway.Services
         {
             // 先停止心跳。原因：主进程即将退出，继续发送心跳会让看门狗
             // 误以为主进程仍然健康，干扰退出后的状态判断。
-            try { _heartbeatTimer?.Dispose(); } catch { }
+try { _heartbeatTimer?.Dispose(); } catch (Exception ex) { _log.Append($"[看门狗] 停止时释放定时器失败: {ex.Message}"); }
             _heartbeatTimer = null;
-            try { _heartbeatEvent?.Dispose(); } catch { }
+try { _heartbeatEvent?.Dispose(); } catch (Exception ex) { _log.Append($"[看门狗] 停止时释放事件失败: {ex.Message}"); }
             _heartbeatEvent = null;
 
             // Set 优雅退出事件，让看门狗在主进程退出后不执行重启
@@ -416,7 +418,7 @@ namespace OpcDaToUaGateway.Services
                             p.WaitForExit(3000);
                         }
                     }
-                    catch { }
+catch (Exception ex) { _log.Append($"[看门狗] Kill + WaitForExit 失败: {ex.Message}"); }
                     finally
                     {
                         // 无论成功失败都必须 Dispose，释放操作系统进程句柄
@@ -424,7 +426,7 @@ namespace OpcDaToUaGateway.Services
                     }
                 }
             }
-            catch { }
+catch (Exception ex) { _log.Append($"[看门狗] 强制终止进程失败: {ex.Message}"); }
         }
     }
 }
