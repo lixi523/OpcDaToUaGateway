@@ -30,6 +30,8 @@ namespace OpcDaToUaGateway
         private readonly string _serverProgId;
         private readonly Action<string> _logger;  // 日志委托，用于显示诊断信息
         private readonly ushort _namespaceIndex;   // OPC UA 命名空间索引，用于预分配 NodeId
+        // H-21 修复：将服务器主机名作为参数传入，而非硬编码 "localhost"，支持远程 DA 服务器浏览。
+        private readonly string _serverHost;
         private List<OpcDaItemInfo> _allItems = new List<OpcDaItemInfo>();
         private List<OpcDaItemInfo> _displayItems = new List<OpcDaItemInfo>();  // 虚拟模式：当前显示的项（过滤后）
 
@@ -47,20 +49,26 @@ namespace OpcDaToUaGateway
         /// </summary>
         public List<TagConfig> SelectedTags { get; private set; }
 
+        // M-06 修复：此遗留构造函数硬编码 _serverHost = "localhost"，
+        // 使 H-21 的远程服务器支持修复可被绕过。标记为 Obsolete，委托到带 host 参数的构造函数。
+        [Obsolete("请使用 ItemSelectionDialog(serverProgId, logger, namespaceIndex, host) 以支持远程服务器")]
         public ItemSelectionDialog(string serverProgId)
         {
             _serverProgId = serverProgId;
+            _serverHost = "localhost";
             BuildUI();
         }
 
         /// <summary>
         /// 创建浏览对话框，并传入日志委托用于显示诊断信息，以及命名空间索引用于预分配 NodeId。
         /// </summary>
-        public ItemSelectionDialog(string serverProgId, Action<string> logger, ushort namespaceIndex = 2)
+        /// <param name="host">OPC DA 服务器主机名（H-21 修复：支持远程服务器，默认 "localhost"）</param>
+        public ItemSelectionDialog(string serverProgId, Action<string> logger, ushort namespaceIndex = 2, string host = "localhost")
         {
             _serverProgId = serverProgId;
             _logger = logger;
             _namespaceIndex = namespaceIndex;
+            _serverHost = host;
             BuildUI();
         }
 
@@ -312,8 +320,8 @@ namespace OpcDaToUaGateway
             {
                 try
                 {
-                    // 组合 logger：同时写入文件日志 + 更新 UI 状态标签
-                    var items = OpcDaClient.BrowseAllItems(_serverProgId, "localhost", msg =>
+                    // H-21 修复：使用构造函数传入的 _serverHost，而非硬编码 "localhost"
+                    var items = OpcDaClient.BrowseAllItems(_serverProgId, _serverHost, msg =>
                     {
                         // 所有诊断消息写入文件日志，方便离线排查
                         _logger?.Invoke($"[Browse] {msg}");
@@ -667,7 +675,9 @@ namespace OpcDaToUaGateway
                         _listView.Refresh();
 
                         _lblStatus.Text = $"从 CSV 导入: 匹配并勾选了 {matchCount} 个点位 (CSV 共 {importItemIds.Count} 条)";
-                        _btnOK.Enabled = _listView.Items.Count > 0;
+                        // H-22 修复：虚拟模式下 _listView.Items.Count 始终为 0，
+                        // OK 按钮永远不会被启用。改为判断数据是否已加载。
+                        _btnOK.Enabled = _allItems.Count > 0;
 
                         if (matchCount < importItemIds.Count)
                         {

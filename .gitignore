@@ -28,3 +28,9 @@ crash.log
 # ===== OS 杂项 =====
 Thumbs.db
 Desktop.ini
+
+# ===== 架构可视化产物（非源码，可再生）=====
+.archify/
+
+# ===== Agent 会话记忆（非源码，禁止入库）=====
+.agnes/

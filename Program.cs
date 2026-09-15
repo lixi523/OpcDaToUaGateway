@@ -71,22 +71,21 @@ namespace OpcDaToUaGateway
         [STAThread]
         static void Main(string[] args)
         {
-            // H-26: TitaniumAS.Opc.Client 初始化（必须在任何 OPC DA 操作之前调用一次）。
-            // Bootstrap.Initialize() 内部调用 CoInitializeSecurity 配置 COM 安全，
-            // 必须在主线程 STA 初始化之后、任何 COM 对象创建之前执行。
-            Bootstrap.Initialize();
-
-            // P0 修复：注册全局异常处理器，确保无人值守时异常不会导致静默崩溃。
-            // 两个处理器覆盖不同的异常来源：
-            // - ThreadException：WinForms 消息循环中的异常（UI 线程）
-            // - UnhandledException：所有线程中未被 catch 的异常（包括后台线程）
-
+            // H-04 修复：全局异常处理器必须在 Bootstrap.Initialize() 之前注册，
+            // 否则 Bootstrap 内部若抛出异常（CoInitializeSecurity 失败等），
+            // 处理器尚未注册，崩溃无法被 crash.log 记录。
             Application.ThreadException += (s, e) =>
             {
                 LogUnhandledException("UI线程异常", e.Exception);
-                MessageBox.Show(
-                    $"程序遇到未处理异常:\n{e.Exception.Message}\n\n已记录到日志文件。",
-                    "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                // H-04 修复：MessageBox.Show 在 UI 控件不一致状态下可能引发二次异常，
+                // 用 try-catch 包裹，确保日志写入不被中断。
+                try
+                {
+                    MessageBox.Show(
+                        $"程序遇到未处理异常:\n{e.Exception.Message}\n\n已记录到日志文件。",
+                        "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
             };
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
@@ -96,6 +95,11 @@ namespace OpcDaToUaGateway
             // 强制 WinForms 将所有异常路由到 ThreadException 处理器，
             // 而非由操作系统默认处理（后者可能直接终止进程而不记录日志）
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+
+            // H-26: TitaniumAS.Opc.Client 初始化（异常处理器注册后执行，确保初始化异常可被记录）。
+            // Bootstrap.Initialize() 内部调用 CoInitializeSecurity 配置 COM 安全，
+            // 必须在主线程 STA 初始化之后、任何 COM 对象创建之前执行。
+            Bootstrap.Initialize();
 
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);

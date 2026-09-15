@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using OpcDaToUaGateway;
@@ -46,10 +47,11 @@ namespace OpcDaToUaGateway.Tests
 
             var key = (byte[])method.Invoke(null, null);
 
-            foreach (var b in key)
-            {
-                Assert.NotEqual(0, b);
-            }
+            // M-08 修复：原断言 Assert.NotEqual(0, b) 对每个字节检查，SHA256 输出含零字节的概率
+            // 约 12%（100% - (255/256)^32），会导致 CI 偶发误报，而密钥本身完全合法。
+            // 改为断言"不全为零"，验证密钥有实质内容即可。
+            Assert.True(key != null && key.Length > 0, "密钥不应为 null 或空");
+            Assert.True(key.Any(b => b != 0), "密钥不应全为零");
         }
 
         // =====================================================================

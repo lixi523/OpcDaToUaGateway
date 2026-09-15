@@ -566,6 +566,10 @@ namespace OpcDaToUaGateway
         private readonly OpcUaConfig _uaConfig;
         private readonly string _baseDirectory;
 
+        // H-05 修复：原子启动标志，防止并发调用 StartAsync 时两个线程都能通过
+        // volatile bool 检查然后各自创建 GatewayServer 实例（端口冲突+旧实例泄漏）。
+        private int _startingFlag;
+
         // H1 修复：volatile 确保多线程可见性（与 GatewayManager.IsRunning 保持一致）。
         // 用于 StartAsync/StopAsync/Dispose 之间的状态协调。
         private volatile bool _isRunning;
@@ -597,8 +601,15 @@ namespace OpcDaToUaGateway
         /// </summary>
         public async Task StartAsync()
         {
-            // H-12 修复：防止重复启动导致旧 Server 实例泄漏。
-            if (_isRunning) return;
+            // H-05 修复："检查-然后-设置"不是原子操作，两个并发调用者都能通过 _isRunning 检查
+            // 然后各自创建 GatewayServer 实例，导致端口冲突或旧实例泄漏。
+            // 使用 Interlocked.CompareExchange 原子标志保护启动入口（与 GatewayManager._startingFlag 同模式）。
+            if (Interlocked.CompareExchange(ref _startingFlag, 1, 0) != 0) return;
+            if (_isRunning)
+            {
+                Interlocked.Exchange(ref _startingFlag, 0);
+                return;
+            }
 
             try
             {
@@ -769,6 +780,11 @@ namespace OpcDaToUaGateway
                 OnStatusChanged?.Invoke($"启动 UA 服务器失败: {ex.Message}");
                 throw;
             }
+            finally
+            {
+                // H-05 修复：无论成功或失败都重置启动标志，允许下次重试
+                Interlocked.Exchange(ref _startingFlag, 0);
+            }
         }
 
         /// <summary>
@@ -826,8 +842,9 @@ namespace OpcDaToUaGateway
         /// </summary>
         public async Task StopAsync()
         {
-            // M-05 修复：在 Dispose 过程中 _server 可能已被置 null，直接跳过
-            if (_disposedInt == 1) return;
+            // H-06 修复：Dispose 过程中 _server 可能已被置 null，直接跳过。
+            // 使用 Volatile.Read 确保读取到其他线程写入的最新值，避免 JIT 寄存器缓存。
+            if (Volatile.Read(ref _disposedInt) == 1) return;
 
             try
             {
@@ -878,7 +895,9 @@ namespace OpcDaToUaGateway
                     //        Dispose() 无限阻塞，导致进程无法正常退出。
                     try
                     {
-                        var stopTask = Task.Run(() => _server.StopAsync());
+                        // H-04 修复：Task.Run(() => asyncMethod()) 对 ValueTask 不适用 Unwrap。
+                        // 改用 async lambda 确保 await 完整执行异步停止链。
+                        var stopTask = Task.Run(async () => await _server.StopAsync());
                         if (!stopTask.Wait(10000))
                         {
                             // 超时后不抛异常，直接进入 finally 块的 Dispose 清理

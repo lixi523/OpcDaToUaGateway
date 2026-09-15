@@ -500,7 +500,9 @@ namespace OpcDaToUaGateway
 
             try
             {
-                using (var dialog = new ItemSelectionDialog(progId, _log.Append, Config.OpcUa.NamespaceIndex))
+                // H-21 修复：传入配置的服务器主机名，支持远程 DA 服务器标签浏览
+                string daHost = Config.OpcDa?.ServerHost;
+                using (var dialog = new ItemSelectionDialog(progId, _log.Append, Config.OpcUa.NamespaceIndex, daHost ?? "localhost"))
                 {
                     _btnFetchTags.Enabled = true;
 
@@ -611,11 +613,15 @@ namespace OpcDaToUaGateway
         private void HealthCheck()
         {
             _gatewayMgr?.CheckHealth();
+            // H-14 修复：每次健康检查同时触发一次快照采集（每 5 分钟一次）
+            _healthSnapshot?.Capture();
         }
 
         private void ScheduleAutoStartIfNeeded()
         {
-            if (Config?.AutoStartUa != true || Config.OpcDa?.Tags?.Count <= 0)
+            // H-01 修复：Config.OpcDa?.Tags?.Count <= 0 当 Tags 为 null 时，?.Count 返回 null，
+            // null <= 0 在可空比较中结果为 false，导致 return 被跳过，Tags 为 null 时错误地继续调度。
+            if (Config?.AutoStartUa != true || Config.OpcDa?.Tags == null || Config.OpcDa.Tags.Count == 0)
                 return;
 
             _log.Append("[自动启动] 检测到自动启动选项已启用，1 秒后启动网关...");
@@ -830,7 +836,10 @@ namespace OpcDaToUaGateway
                 _notifyIcon.Visible = false;
                 Close();
             };
-            _licenseMgr.GatewayStopRequested += async () => await handleTrialExpiredAsync();
+            // H-02 修复：async void 委托在 GatewayStopRequested 事件中若抛出异常，
+            // 异常将在 async void 边界变为未观察异常，直接触发 UnhandledExceptionHandler 崩溃进程。
+            // 改为普通 lambda 捕获 Task，在 handleTrialExpiredAsync 内部做完整异常处理。
+            _licenseMgr.GatewayStopRequested += () => { _ = handleTrialExpiredAsync(); };
             if (_licenseMgr.IsTrialExpired)
                 _ = handleTrialExpiredAsync();
             else

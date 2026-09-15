@@ -8,9 +8,9 @@
     <LangVersion>8.0</LangVersion>
     <PlatformTarget>x86</PlatformTarget>
     <ApplicationIcon>..\opc-da-opc-ua.ico</ApplicationIcon>
-    <Version>2.4.0</Version>
-    <AssemblyVersion>2.4.0.0</AssemblyVersion>
-    <FileVersion>2.4.0.0</FileVersion>
+    <Version>2.5.0</Version>
+    <AssemblyVersion>2.5.0.0</AssemblyVersion>
+    <FileVersion>2.5.0.0</FileVersion>
     <Company>OPC DA to UA Gateway</Company>
     <Product>OPC DA to OPC UA Gateway Keygen</Product>
     <Description>OPC DA to UA Gateway 授权码计算工具</Description>

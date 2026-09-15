@@ -1,6 +1,6 @@
 ﻿# OPC DA 转 OPC UA 网关开发指南
 
-**版本：2.4.0**
+**版本：2.5.0**
 
 ## 项目概述
 
@@ -111,7 +111,7 @@ Program.cs (STA 入口 + 单实例 Mutex)
 ```
 OpcDaToUaGateway/
 ├── OpcDaToUaGateway.sln              # 解决方案文件（含三个项目）
-├── OpcDaToUaGateway.csproj           # 主项目文件（含版本号 1.8.0）
+├── OpcDaToUaGateway.csproj           # 主项目文件（含版本号 2.5.0）
 ├── FodyWeavers.xml                   # Costura.Fody DLL 嵌入配置
 ├── Program.cs                        # 应用程序入口 (STAThread + 单实例 Mutex)
 ├── MainForm.cs                       # 主窗口（UI 构建 + 协调各 Manager）
@@ -997,9 +997,9 @@ UI 日志文本框超过 100,000 字符时自动截断到后 50,000 字符。
 版本号在 `.csproj` 中统一管理：
 
 ```xml
-<Version>1.8.0</Version>
-<AssemblyVersion>1.8.0.0</AssemblyVersion>
-<FileVersion>1.8.0.0</FileVersion>
+<Version>2.5.0</Version>
+<AssemblyVersion>2.5.0.0</AssemblyVersion>
+<FileVersion>2.5.0.0</FileVersion>
 ```
 
 同时硬编码在以下位置（需同步更新）：
@@ -1170,7 +1170,11 @@ WMI 硬件标识（CPU ProcessorId、主板序列号、BIOS 序列号）在同�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| **V2.1.0** | 2026-07-23 | **全面代码审查修复**：① String 类型标签在 DA 浏览时数据类型显示错误（`ExtractDataType`/`FillRealDataTypes` 中 `!= "String"` 排除条件移除）；② `ItemSelectionDialog` 独立 CSV 导出格式与 `CsvTagExporter` 统一为 5 列格式（表头 `序号,ItemId,名称,数据类型,描述`，头部 `#修改C3`，空行 `,,,,`）；③ MainForm 图标加载路径改为 `opc-da-opc-ua.ico`；④ `ConfigManager` FileSystemWatcher debounce Timer 泄漏修复（提升为字段 + `Interlocked.Exchange`）；⑤ `FillRealDataTypes` 临时 Group 添加 UpdateRate；⑥ `GatewayOpcUaServer.StopAsync()` 添加 `_disposedInt` 守卫；⑦ `HealthSnapshot` 空 catch 替换为 Debug.WriteLine；⑧ Watchdog 重启传递 `--minimized` 参数；⑨ `DataBridge.Start()` 标记 `[Obsolete]`。编译 0 警告 0 错误。\n| 2.0.0 | 2026-07-21 |**DA 标签真实数据类型获取**：浏览阶段通过临时 OPC DA Group 调用 AddItems，从 OpcDaItem.CanonicalDataType 提取实际数据类型（Integer、Float、Boolean 等），替代原有的固定 Variant 描述；分批处理（每批 500 个点位），失败时静默回退不影响浏览结果。版本号 1.5.0 → 2.0.0。编译 0 警告 0 错误。
+| **V2.5.0** | 2026-08-06 | **代码审查修复第二轮**：修复 `GatewayManager.StartAsync` 构造函数注入失效（局部变量覆盖字段）；`EffectiveMaxReconnectAttempts` 快照消除热更新 TOCTOU 与重连计数器提前停止；`GatewayOpcUaServer` 原子启动标志、`StopAsync` Volatile.Read、停止链 async lambda；`DataBridge` 字段竞态改用快照局部变量；`ConfigManager` 序列化异常后授权码恢复 + 防抖 Timer 字段化 + GUID 临时文件名；`HealthSnapshot.Capture()` 由私有未调用改为公共并由健康 Timer 触发，填充核心指标，文件 I/O 移出锁外；`Program.cs` 异常处理器前移到 Bootstrap 初始化之前；`ItemSelectionDialog` 远程 DA 主机支持 + 虚拟模式 OK 按钮修复；`LicenseManager` PCID 与试用状态文件异常处理；`TrialStateStore` DPAPI 作用域 `LocalMachine`→`CurrentUser`；`CsvTagExporter` 原子写入与 BOM 检测优化。主程序、Keygen、Watchdog 与 `AppConstants` 版本统一为 2.5.0；Debug/Release 0 警告 0 错误，测试 67/67 通过。 |
+| **V2.4.0** | 2026-08-01 | **稳定性增强与版本发布**：试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 WinForms Timer 并在 UI 线程执行；OPC DA Sync 模式重连保持；同步 Read 增加重入门禁，停止或重连时等待在途 Read 后安全释放 COM；清理 `_gridTags` 既有警告；主程序、Keygen、Watchdog 与 `AppConstants` 版本统一为 2.4.0；Debug/Release 0 警告 0 错误，测试 66/66 通过。 |
+| **V2.3.0** | 2026-07-26 | **安全增强与代码质量优化**：授权码加密存储、回调与转换防护、ConfigManager 锁策略拆分、定时器与日志资源修复、SafeInvoke/FormClosing/TryReconnect 稳定性优化、AutoStartManager 分离及 BuildUI 拆分。 |
+| **V2.2.0** | 2026-07-23 | **全面代码审查修复**：String 类型标签显示修复、CSV 格式统一、按钮导航移除、图标更新、接口抽象与单元测试。编译 0 警告 0 错误。 |
+| **V2.0.0** | 2026-07-21 | **DA 标签真实数据类型获取**：通过临时 OPC DA Group 的 `CanonicalDataType` 提取实际数据类型；分批处理，失败时回退。编译 0 警告 0 错误。 |
 | 1.9.0 | 2026-07-20 |**全面代码审查 + 启动卡顿最终修复 + DA模式切换**：① DataBridge.StartAsync 异步启动（Task.Run 后台线程创建节点 + SynchronizationContext.Post 进度回调），3.5 万节点场景窗口保持响应；② 新增 DA 数据获取方式选择（异步订阅/同步轮询），UI 下拉框 + 配置持久化；③ 首次运行默认填充 ProgId Matrikon.OPC.Simulation.1，开箱即用；④ 未选择服务器时禁用获取点位和启动网关按钮；⑤ Boolean 类型转换增强（支持字符串 true/1/yes 等）；⑥ SourceTimestamp 单调递增修复（bool 翻转标签可被 UA 客户端正确检测）；⑦ Dispose 后重连检查、Monitor.Exit 安全检查、SafeInvoke 句柄防护；⑧ ConfigManager 实现 IDisposable；⑨ 版本号 1.5.0 → 1.9.0；⑩ 删除 PLAN.md（文档整合完成）。编译 0 警告 0 错误。
 | 1.8.0 | 2026-07-16 | **移除「已连接客户端」列表功能并升级版本号**：撤销 V1.7.0(2026-07-15) 在「OPC UA 服务器设置」区右侧新增的「已连接客户端」列表——删除 `MainForm` 的 `_grpClients`/`_lstClients` 控件、`RefreshConnectedClients()` 定时器刷新逻辑及 `SetUiRunningState` 停止清空逻辑；删除 `GatewayOpcUaServer.GetConnectedClients()` 方法与 `GatewayServer.ServerInternalAccess` 属性、`IGatewayOpcUaServer.GetConnectedClients()` 接口声明；OPC UA 设置区分组高度回退至 150、布局恢复紧凑。撤销原因：该列表每 1~3 秒在 UI 线程经 `SessionManager.GetSessions()` 访问 OPC UA SDK 会话管理器，与 UA 客户端请求线程竞争 SDK 内部锁，导致窗口「未响应」；移除后该访问路径彻底消除。**启动卡顿修复：** 启动网关后窗口「未响应」已定位并修复——根因为 `GatewayNodeManager.AddVariableNode` 在每次创建变量节点时调用 `Diag()`，经 `OnStatusChanged`→`_log.Append`→`BeginInvoke` 向 UI 线程投递数万次日志更新（`LogManager.UpdateTextBox` 每次 O(文本长度)、累计 O(n²)），3.5 万节点场景导致约 7 分钟卡死；该 `Diag` 路径独立于 `DataBridge` 已节流的 `Log`，此前排查时未被覆盖（"已排除诊断日志洪泛"结论不准确）。已移除该逐节点诊断调用；节点创建仍走 O(1) 的 `AddPredefinedNode`（经反编译 `Opc.Ua.Server.dll` 1.5.378.145 确认其仅做 `PredefinedNodes` 字典注册 + 空子节点递归，无逐节点通知/地址空间重建）。三个项目版本号统一升至 1.8.0；编译 0 警告 0 错误 ✅ |
 | 1.7.0 (UA 设置区 UI 调整) | 2026-07-15 | **调整「OPC UA 服务器设置」区（版本号保持 1.7.0 不变）**：① 监听地址与安全模式下拉框宽度统一为 140；② 标签「端口」→「端口号」、「最大会话数」→「连接数」，且端口号与连接数左对齐（标签 x=250、控件 x=310）；③ 「自动接受客户端证书」移至安全模式下方独立行；④ 删除「当前安全配置为开放模式，生产环境建议启用加密」警告标签及其 `UpdateSecurityWarning` 逻辑；⑤ 右侧空余区新增「已连接客户端」列表（`GroupBox` + `ListBox`），由 UA 服务器 `GetConnectedClients()`（经 `IServerInternal.SessionManager.GetSessions()` 读取活动会话的 `SessionDiagnostics.SessionName` / `ClientDescription.ApplicationName` / `ApplicationUri`）借 `RefreshStats` 定时器定期刷新、停止时清空；`OPC UA 服务器设置` 分组高度 130→150；编译 0 警告 0 错误 ✅ |

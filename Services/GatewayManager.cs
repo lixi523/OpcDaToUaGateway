@@ -142,6 +142,13 @@ namespace OpcDaToUaGateway.Services
         {
             _log = log ?? throw new ArgumentNullException(nameof(log));
             _config = config ?? throw new ArgumentNullException(nameof(config));
+
+            // H-12 修复：构造函数接受接口参数但之前未赋值，注入的 Mock 在 StartAsync 里被忽略。
+            // 非 null 时存入字段，StartAsync 中的 `if (xxx == null) xxx = new ...` 兜底逻辑
+            // 才能正确跳过真实对象创建，使单元测试依赖注入生效。
+            if (daClient != null) _daClient = daClient;
+            if (uaServer != null) _uaServer = uaServer;
+            if (bridge != null) _bridge = bridge;
         }
 
         /// <summary>
@@ -168,9 +175,13 @@ namespace OpcDaToUaGateway.Services
                 Interlocked.Exchange(ref _startingFlag, 1);
             }
 
-            GatewayOpcUaServer uaServer = null;
-            OpcDaClient daClient = null;
-            DataBridge bridge = null;
+            // H-01 修复：原先声明 uaServer/daClient/bridge 均为 null 的局部变量，
+            // 下方的 `if (xxx == null) xxx = new ...` 判断局部变量，永远为 null，
+            // 构造函数注入的字段值（_uaServer/_daClient/_bridge）完全被忽略，DI 失效。
+            // 修复：从字段读取初始值，注入非 null 时直接使用，null 时才创建真实实例。
+            GatewayOpcUaServer uaServer = _uaServer as GatewayOpcUaServer;
+            OpcDaClient daClient = _daClient as OpcDaClient;
+            DataBridge bridge = _bridge as DataBridge;
 
             try
             {
@@ -356,28 +367,33 @@ try { uaServer.Dispose(); } catch (Exception ex) { _log.Append($"[网关] UA Ser
             {
                 if (daClient.IsConnected) return;
 
-                int attempts = Interlocked.Increment(ref _reconnectAttempts);
+                // M-02 修复：EffectiveMaxReconnectAttempts 是计算属性，每次调用都重新读配置。
+                // 若配置在 CheckHealth 执行期间被热更新，三处调用可能得到不同值，
+                // 导致"停止重连"日志条件永远不满足。快照为局部变量，确保逻辑一致。
+                int maxAttempts = EffectiveMaxReconnectAttempts;
 
+                // H-09 修复：_reconnectAttempts 原先在退避检查前就递增，导致退避等待期间
+                // 计数器持续膨胀，远早于预期触发"达到最大重连次数"。
                 long nowTicks = DateTime.UtcNow.Ticks;
                 long lastTicks = Interlocked.Read(ref _lastReconnectAttemptTicks);
-                int backoffMs = (int)Math.Min(1000L * (1L << Math.Min(attempts, 6)), 60000L);
+                int currentAttempts = _reconnectAttempts; // 仅用于计算退避窗口，不消耗计数
+                int backoffMs = (int)Math.Min(1000L * (1L << Math.Min(currentAttempts, 6)), 60000L);
                 long elapsedMs = (nowTicks - lastTicks) / TimeSpan.TicksPerMillisecond;
                 if (lastTicks > 0 && elapsedMs < backoffMs) return;
                 Interlocked.Exchange(ref _lastReconnectAttemptTicks, nowTicks);
 
-                // 此处存在一个理论上的竞态——如果两个线程同时到达这里，
-                // Interlocked.Increment 分别返回 N 和 N+1，但 CompareExchange 的比较值
-                // 可能已被对方修改导致失败。实际效果是多尝试一次重连，不会导致严重错误。
-                // 由于 CheckHealth 调用频率很低（秒级），此竞态窗口极窄，暂不引入额外锁。
-                if (attempts > EffectiveMaxReconnectAttempts)
+                // 退避窗口已过，本次真正要重连：此时才递增计数器
+                int attempts = Interlocked.Increment(ref _reconnectAttempts);
+
+                if (attempts > maxAttempts)
                 {
-                    Interlocked.CompareExchange(ref _reconnectAttempts, EffectiveMaxReconnectAttempts + 1, attempts);
-                    attempts = EffectiveMaxReconnectAttempts + 1;
+                    Interlocked.CompareExchange(ref _reconnectAttempts, maxAttempts + 1, attempts);
+                    attempts = maxAttempts + 1;
                 }
 
-                if (attempts <= EffectiveMaxReconnectAttempts)
+                if (attempts <= maxAttempts)
                 {
-                    _log.Append($"[监控] DA 连接断开，尝试重连 ({attempts}/{EffectiveMaxReconnectAttempts})...");
+                    _log.Append($"[监控] DA 连接断开，尝试重连 ({attempts}/{maxAttempts})...");
                     DaStatusChanged?.Invoke("● DA: 重连中...", Color.Orange);
 
                     bool success = daClient.TryReconnect(_config.OpcDa.UpdateRateMs);
@@ -390,7 +406,7 @@ try { uaServer.Dispose(); } catch (Exception ex) { _log.Append($"[网关] UA Ser
                         _log.Append("[监控] DA 重连成功");
                     }
                 }
-                else if (attempts == EffectiveMaxReconnectAttempts + 1)
+                else if (attempts == maxAttempts + 1)
                 {
                     _log.Append("[监控] 达到最大重连次数，停止重连。请手动检查 OPC DA 服务器。");
                     DaStatusChanged?.Invoke("● DA: 重连失败", Color.Red);

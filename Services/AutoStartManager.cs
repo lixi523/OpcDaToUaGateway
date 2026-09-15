@@ -54,6 +54,11 @@ namespace OpcDaToUaGateway.Services
             string exePath = Application.ExecutablePath;
 
             Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+            // H-05 修复：受限环境（组策略禁用WScript、服务器精简安装）下 GetTypeFromProgID 返回 null，
+            // 原先直接传入 null 给 Activator.CreateInstance 会抛 ArgumentNullException，
+            // 错误提示毫无诊断价值。改为提前检查并抛出友好的 InvalidOperationException。
+            if (shellType == null)
+                throw new InvalidOperationException("无法找到 WScript.Shell COM 类，请确认脚本主机（Windows Script Host）已启用。");
             object shell = Activator.CreateInstance(shellType);
             object shortcut = null;
             try

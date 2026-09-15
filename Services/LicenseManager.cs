@@ -52,8 +52,14 @@ namespace OpcDaToUaGateway.Services
             _requestGatewayStop = requestGatewayStop;
             _trialStateStore = trialStateStore ?? throw new ArgumentNullException(nameof(trialStateStore));
 
+            // H-18 修复：捕获具体异常并记录，而非吞掉所有异常并用 "UNKNOWN" 替代。
+            // "UNKNOWN" 会导致已保存的授权码与 PCID 不匹配，有效授权被清除，用户看到试用倒计时。
             try { _pcid = LicenseAlgorithm.GeneratePCID(); }
-            catch { _pcid = "UNKNOWN"; }
+            catch (Exception ex)
+            {
+                _pcid = "UNKNOWN";
+                _log.Append($"[授权] ⚠ 读取机器码失败（{ex.GetType().Name}: {ex.Message}），已授权的用户可能需要重新输入授权码");
+            }
 
             _log.Append($"[授权] 机器码 PCID: {_pcid}");
 
@@ -91,8 +97,12 @@ namespace OpcDaToUaGateway.Services
             TrialStateLoadResult loadResult = _trialStateStore.Initialize(out _persistedTrialSeconds);
             if (loadResult == TrialStateLoadResult.Invalid)
             {
-                _persistedTrialSeconds = (long)TimeSpan.FromMinutes(AppConstants.TrialPeriodMinutes).TotalSeconds;
-                _log.Append("[授权] 试用状态文件无效，按试用到期处理");
+                // H-19 修复：Invalid（文件损坏/磁盘抖动）≠ 试用已满。
+                // 原先直接设为满额秒数导致任何一过性 I/O 故障都使正常用户被强制过期。
+                // 改为：将累计时间保留为 0（按首次运行处理），记录警告，让用户继续试用。
+                // 防误用说明：TrySave 会在下次 Tick 写入新文件，真实持久化在保存成功后才生效。
+                _persistedTrialSeconds = 0;
+                _log.Append("[授权] ⚠ 试用状态文件无效或损坏，按首次运行重置（若重复出现请检查文件权限）");
             }
 
             _lastSavedTrialSeconds = _persistedTrialSeconds;

@@ -29,6 +29,13 @@ namespace OpcDaToUaGateway.Services.Interfaces
         event Action<string, int> OnAlert;
 
         /// <summary>
+        /// 触发一次健康快照采集（进程内存、DA 连接状态、UA 变量数等）。
+        /// H-14 修复：Capture 原为私有方法且从未被调用，健康文件永远不会产生数据。
+        /// 现在暴露为公共接口方法，由 MainForm._healthTimer.Tick 每 5 分钟调用一次。
+        /// </summary>
+        void Capture();
+
+        /// <summary>
         /// 手动触发一次"昨日"日聚合。3.5 扩展点：测试 / 菜单可调用，
         /// 立即读取现有 health_*.json 计算并追加到 health_daily.jsonl。
         /// </summary>

@@ -45,7 +45,7 @@ namespace OpcDaToUaGateway.Services
             try
             {
                 byte[] protectedData = File.ReadAllBytes(_filePath);
-                byte[] data = ProtectedData.Unprotect(protectedData, null, DataProtectionScope.LocalMachine);
+                byte[] data = ProtectedData.Unprotect(protectedData, null, DataProtectionScope.CurrentUser);
                 using (var stream = new MemoryStream(data, false))
                 using (var reader = new BinaryReader(stream))
                 {
@@ -88,7 +88,7 @@ namespace OpcDaToUaGateway.Services
                     data = stream.ToArray();
                 }
 
-                byte[] protectedData = ProtectedData.Protect(data, null, DataProtectionScope.LocalMachine);
+                byte[] protectedData = ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser);
                 File.WriteAllBytes(tempPath, protectedData);
 
                 if (File.Exists(_filePath))

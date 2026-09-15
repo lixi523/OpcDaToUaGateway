@@ -68,6 +68,10 @@ namespace OpcDaToUaGateway.Services
         /// </summary>
         public event Action ConfigFileChanged;
 
+        // H-23 修复：将防抖定时器提升为实例字段，用 Interlocked.Exchange 原子替换，
+        // 防止 Changed 事件并发触发时的写-写竞态（双重 Dispose 或新 Timer 引用丢失）。
+        private System.Threading.Timer _watcherDebounce;
+
         // S-3 修复：授权码加密存储的 AES 密钥，由 LicenseAlgorithm.DeriveKey() 派生
         private static readonly byte[] _authCodeKey = LicenseAlgorithm.GetEncryptionKey();
 
@@ -402,19 +406,17 @@ namespace OpcDaToUaGateway.Services
             if (Config == null) return false;
 
             // R-8 修复：在 try 外部保存 Tags 原始引用，确保 finally 块能访问它。
-            // 如果序列化阶段抛出异常，finally 会恢复原始引用而非创建空列表，
-            // 防止 35K 标签数据永久丢失。
             var tags = Config.OpcDa?.Tags;
+            // H-16 修复：在 try 外声明 originalAuthCode，确保 finally 块能访问。
+            string originalAuthCode = Config.AuthorizationCode;
             try
             {
                 string configPath = GetConfigPath();
 
                 // P1-1: 临时置 null Tags 以从 config.json 中排除标签数据。
-                // 标签数据由 SaveTagsImmediate() 单独写入 tags.json。
                 if (Config.OpcDa != null) Config.OpcDa.Tags = null;
 
                 // S-3 修复：序列化前加密授权码，防止明文存储
-                string originalAuthCode = Config.AuthorizationCode;
                 if (!string.IsNullOrEmpty(Config.AuthorizationCode))
                     Config.AuthorizationCode = EncryptAuthCode(Config.AuthorizationCode);
 
@@ -427,8 +429,9 @@ namespace OpcDaToUaGateway.Services
                 // 恢复 Tags 引用（正常路径）
                 if (Config.OpcDa != null) Config.OpcDa.Tags = tags;
 
-                // 原子写入 config.json
-                string tempPath = configPath + ".tmp";
+                // M-03 修复：固定后缀 .tmp 在多进程并发保存时会互相覆盖临时文件，
+                // 与 TrialStateStore/CsvTagExporter 保持一致，改用 GUID 随机临时文件名。
+                string tempPath = configPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 File.WriteAllText(tempPath, configJson);
                 if (File.Exists(configPath))
                     File.Replace(tempPath, configPath, null);
@@ -444,6 +447,12 @@ namespace OpcDaToUaGateway.Services
             }
             finally
             {
+                // H-16 修复：序列化异常时 AuthorizationCode 可能已被覆盖为加密后的 Base64 字符串。
+                // 必须同时恢复 AuthorizationCode，否则下次启动授权验证将用 Base64 密文与 HMAC 比对，
+                // 导致有效授权被清除并强制进入试用模式。
+                if (Config?.AuthorizationCode != null && Config.AuthorizationCode != originalAuthCode)
+                    Config.AuthorizationCode = originalAuthCode;
+
                 // R-8 修复：序列化异常时 Tags 可能为 null，恢复原始引用而非空列表
                 if (Config?.OpcDa != null && Config.OpcDa.Tags == null)
                     Config.OpcDa.Tags = tags;
@@ -565,17 +574,20 @@ namespace OpcDaToUaGateway.Services
                     EnableRaisingEvents = false  // 先不启动，等防抖设置完
                 };
 
-                // 防抖：500ms 内多次变更只触发一次
-                System.Threading.Timer debounce = null;
+                // H-23 修复：Changed 事件可从多个 IO 完成端口线程并发触发，
+                // 闭包局部变量 debounce 存在写-写竞态（双重 Dispose 或新 Timer 引用丢失）。
+                // 将其提升为实例字段 _watcherDebounce，用 Interlocked.Exchange 原子替换，
+                // 确保旧 Timer 被唯一地获取后再 Dispose，新 Timer 引用不被覆盖。
                 _configWatcher.Changed += (s, e) =>
                 {
-                    debounce?.Dispose();
-                    debounce = new System.Threading.Timer(_ =>
-                    {
-                        try { debounce?.Dispose(); } catch { }
-                        _log?.Append("[配置] 检测到 config.json 外部修改");
-                        ConfigFileChanged?.Invoke();
-                    }, null, 500, Timeout.Infinite);
+                    var old = Interlocked.Exchange(ref _watcherDebounce,
+                        new System.Threading.Timer(_ =>
+                        {
+                            Interlocked.Exchange(ref _watcherDebounce, null)?.Dispose();
+                            _log?.Append("[配置] 检测到 config.json 外部修改");
+                            ConfigFileChanged?.Invoke();
+                        }, null, 500, Timeout.Infinite));
+                    old?.Dispose();
                 };
 
                 _configWatcher.EnableRaisingEvents = true;

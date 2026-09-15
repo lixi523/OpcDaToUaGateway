@@ -41,23 +41,38 @@ jobs:
       - name: Build (Release)
         run: dotnet build OpcDaToUaGateway.sln -c Release -v minimal
 
-      - name: 打包版本化产物
+      - name: 打包版本化产物（排除 Keygen/Watchdog）
         shell: pwsh
         run: |
           $v = '${{ steps.version.outputs.APP_VERSION }}'
           $rel = "OpcDaToUaGateway-v$v"
+          $source = "bin/Release/net472"
+          $exclude = @("OpcDaToUaGateway.Keygen.exe", "OpcDaToUaGateway.Watchdog.exe")
           New-Item -ItemType Directory -Force -Path $rel | Out-Null
-          if (Test-Path bin/Release/net472)         { Copy-Item bin/Release/net472/* $rel -Recurse -Force }
-          if (Test-Path Keygen/bin/Release/net472)  { New-Item -ItemType Directory -Force -Path "$rel/Keygen"  | Out-Null; Copy-Item Keygen/bin/Release/net472/*  "$rel/Keygen"  -Recurse -Force }
-          if (Test-Path Watchdog/bin/Release/net472){ New-Item -ItemType Directory -Force -Path "$rel/Watchdog" | Out-Null; Copy-Item Watchdog/bin/Release/net472/* "$rel/Watchdog" -Recurse -Force }
+
+          # 客户发布包只包含主程序、必要 DLL、config.json；Keygen 和 Watchdog 均不得进入客户包
+          if (Test-Path $source) {
+            $sourcePath = (Resolve-Path $source).Path
+            Get-ChildItem $source -Recurse | ForEach-Object {
+              if ($exclude -contains $_.Name) { return }
+              $relativePath = $_.FullName.Substring($sourcePath.Length).TrimStart('\')
+              $targetPath = Join-Path $rel $relativePath
+              if ($_.PSIsContainer) {
+                New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+              } else {
+                Copy-Item $_.FullName $targetPath -Force
+              }
+            }
+          }
+
           Compress-Archive -Path $rel -DestinationPath "$rel.zip" -Force
-          Write-Host "已生成版本化包: $rel.zip"
+          Write-Host "已生成版本化包: $rel.zip (已排除 Keygen/Watchdog)"
 
       - name: 上传构建产物 (Artifact)
         uses: actions/upload-artifact@v4
         with:
           name: OpcDaToUaGateway-v${{ steps.version.outputs.APP_VERSION }}
-          path: bin/Release/net472/
+          path: ${{ github.workspace }}/OpcDaToUaGateway-v${{ steps.version.outputs.APP_VERSION }}
           if-no-files-found: warn
 
       - name: 创建 GitHub Release（仅打 v* tag 时）

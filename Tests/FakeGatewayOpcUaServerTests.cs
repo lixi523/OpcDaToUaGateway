@@ -59,12 +59,11 @@ namespace OpcDaToUaGateway.Tests
         {
             _fake.ThrowOnAddNode = true;
             await _fake.StartAsync();
-            var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
-            {
-                _fake.AddVariableNode("Fail", "Item", "Disp", BuiltInType.String);
-                return Task.CompletedTask;
-            });
-            Assert.NotNull(ex);
+            // H-03 修复：AddVariableNode 是同步方法，ThrowsAnyAsync 无法捕获同步异常
+            // （同步异常在 lambda 里抛出但不进入 Task，ThrowsAnyAsync 捕获的是 Task 内异常）。
+            // 改为 Assert.ThrowsAny<Exception>() 捕获同步异常。
+            Assert.ThrowsAny<Exception>(() =>
+                _fake.AddVariableNode("Fail", "Item", "Disp", BuiltInType.String));
         }
 
         [Fact]
@@ -73,12 +72,9 @@ namespace OpcDaToUaGateway.Tests
             _fake.ThrowOnUpdate = true;
             await _fake.StartAsync();
             _fake.AddVariableNode("Tag1", "Item1", "Display1", BuiltInType.Int32);
-            var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
-            {
-                _fake.UpdateValue("Tag1", 0, true, DateTime.UtcNow);
-                return Task.CompletedTask;
-            });
-            Assert.NotNull(ex);
+            // H-03 修复：UpdateValue 是同步方法，改为 Assert.ThrowsAny<Exception>。
+            Assert.ThrowsAny<Exception>(() =>
+                _fake.UpdateValue("Tag1", 0, true, DateTime.UtcNow));
         }
 
         [Fact]
@@ -111,12 +107,9 @@ namespace OpcDaToUaGateway.Tests
         public async Task AddNode_ThrowsWhenNotRunning()
         {
             // Do NOT call StartAsync - server is not running
-            var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
-            {
-                _fake.AddVariableNode("X", "Y", "Z", BuiltInType.String);
-                return Task.CompletedTask;
-            });
-            Assert.NotNull(ex);
+            // H-03 修复：AddVariableNode 是同步方法，改为 Assert.ThrowsAny<Exception>。
+            Assert.ThrowsAny<Exception>(() =>
+                _fake.AddVariableNode("X", "Y", "Z", BuiltInType.String));
         }
 
         [Fact]
@@ -124,31 +117,27 @@ namespace OpcDaToUaGateway.Tests
         {
             await _fake.StartAsync();
             _fake.AddVariableNode("Dup", "I1", "D1", BuiltInType.Int32);
-            var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
-            {
-                _fake.AddVariableNode("Dup", "I2", "D2", BuiltInType.Int32);
-                return Task.CompletedTask;
-            });
-            Assert.NotNull(ex);
+            // H-03 修复：改为同步 Assert.ThrowsAny。
+            Assert.ThrowsAny<Exception>(() =>
+                _fake.AddVariableNode("Dup", "I2", "D2", BuiltInType.Int32));
         }
 
         [Fact]
         public async Task UpdateValue_NonExistentKey_Throws()
         {
             await _fake.StartAsync();
-            var ex = await Assert.ThrowsAnyAsync<Exception>(() =>
-            {
-                _fake.UpdateValue("NoKey", 0, true, DateTime.UtcNow);
-                return Task.CompletedTask;
-            });
-            Assert.NotNull(ex);
+            // H-03 修复：UpdateValue 是同步方法，改为 Assert.ThrowsAny<Exception>。
+            Assert.ThrowsAny<Exception>(() =>
+                _fake.UpdateValue("NoKey", 0, true, DateTime.UtcNow));
         }
 
         [Fact]
-        public void Disposed_StartAsync_ThrowsObjectDisposed()
+        public async Task Disposed_StartAsync_ThrowsObjectDisposed()
         {
             _fake.Dispose();
-            Assert.Throws<ObjectDisposedException>(() => _fake.StartAsync().Wait());
+            // M-09 修复：.Wait() 将异步异常包装为 AggregateException，Assert.Throws<ObjectDisposedException>
+            // 无法匹配内层异常。改用 await Assert.ThrowsAsync<ObjectDisposedException>。
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => _fake.StartAsync());
         }
 
         [Fact]

@@ -61,7 +61,15 @@ namespace OpcDaToUaGateway.Services
                     sb.AppendLine(MakeRow((i + 1).ToString(), itemId, name, dataType, description, uaAddress));
                 }
 
-                File.WriteAllText(filePath, sb.ToString(), new UTF8Encoding(true));
+                // M-25 修复：直接写目标文件，进程崩溃会产生残缺文件。
+                // 改用"临时文件 + File.Replace"原子写入模式，与 ConfigManager/TrialStateStore 保持一致。
+                string content = sb.ToString();
+                string tempPath = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllText(tempPath, content, new UTF8Encoding(true));
+                if (File.Exists(filePath))
+                    File.Replace(tempPath, filePath, null);
+                else
+                    File.Move(tempPath, filePath);
                 log?.Append($"[CSV导出] 已导出 {tags.Count} 个标签到 {filePath}");
                 return true;
             }
@@ -252,14 +260,21 @@ namespace OpcDaToUaGateway.Services
 
         private static Encoding DetectEncoding(string filePath)
         {
-            byte[] bytes = File.ReadAllBytes(filePath);
-            if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            // M-26 修复：原实现读取整个文件字节只为检查 4 字节 BOM，对大型 CSV（35K 标签≈数MB）
+            // 造成双倍内存峰值（ReadAllBytes 一次 + ReadAllLines 一次）。
+            // 改为只读前 4 字节，避免全量加载。
+            var bom = new byte[4];
+            int read = 0;
+            using (var fs = File.OpenRead(filePath))
+                read = fs.Read(bom, 0, 4);
+
+            if (read >= 3 && bom[0] == 0xEF && bom[1] == 0xBB && bom[2] == 0xBF)
                 return new UTF8Encoding(true);
-            if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            if (read >= 2 && bom[0] == 0xFF && bom[1] == 0xFE)
                 return Encoding.Unicode;
-            if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            if (read >= 2 && bom[0] == 0xFE && bom[1] == 0xFF)
                 return Encoding.BigEndianUnicode;
-            if (bytes.Length >= 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 0xFE && bytes[3] == 0xFF)
+            if (read >= 4 && bom[0] == 0 && bom[1] == 0 && bom[2] == 0xFE && bom[3] == 0xFF)
                 return Encoding.UTF32;
             return Encoding.Default;
         }

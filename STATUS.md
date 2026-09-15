@@ -1,7 +1,7 @@
 ﻿# OPC_DA转UA网关 — 项目状态报告
 
-**生成时间：** 2026-07-23 17:00
-**当前版本：** V2.4.0
+**生成时间：** 2026-08-06
+**当前版本：** V2.5.0
 **编译状态：** 0 警告 0 错误 ✅
 
 ---
@@ -10,7 +10,10 @@
 
 对 OpcDaToUaGateway 项目进行代码瘦身与结构优化（ponytail 8 项），消除过度工程、冗余代码，提升可维护性。
 
-**状态：全部执行完毕，编译通过，版本号已升级到 V2.4.0。**
+**状态：全部执行完毕，编译通过，版本号已升级到 V2.5.0。**
+
+> **版本演进（自 V1.5.0 起，详见 handoff.md / 开发指南版本历史）：**
+> - **V2.5.0（2026-08-06）**：代码审查修复第二轮——GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）修复，EffectiveMaxReconnectAttempts 快照，HealthSnapshot.RotateOldSnapshots 移到锁外，ConfigManager 临时文件改 GUID，Program.cs 异常处理器前移并防护 MessageBox 二次崩溃，AutoStartManager WScript.Shell null 友好错误，ItemSelectionDialog 遗留构造函数 [Obsolete]；测试文件修复：5 处同步方法误用 ThrowsAnyAsync、DeriveKey 断言优化、Task.Delay 时序测试改 ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。
 
 > **版本演进（自 V1.5.0 起，详见 handoff.md / 开发指南版本历史）：**
 > - **V1.5.1**（本会话）：修复 `RunningStateChanged` 跨线程异常（`SafeInvoke` 封送缺失）、`SafeInvoke` 缺句柄防护、删除 `LicenseManager` 死代码 `_requestGatewayStop`；编译 0 警告 0 错误。
@@ -53,7 +56,7 @@
 | 硬编码字符串常量统一 | 替换 ~15 处 |
 | 去除冗余修复注释 | 清理 12 个文件 |
 | **编译验证** | **0 错误 0 警告** |
-| **单元测试** | **56/56 通过** |
+| **单元测试** | **66/66 通过** |
 
 ### ponytail-review（过度工程清理）
 

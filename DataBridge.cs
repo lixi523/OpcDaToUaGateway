@@ -292,8 +292,10 @@ namespace OpcDaToUaGateway
                     Log($"  ...及其他 {failedCount - 10} 个失败");
             }
 
-            int actualVarCount = _uaServer.VariableCount;
-            ushort nsIndex = _uaServer.NamespaceIndex;
+            // H-15 修复：使用已快照的 uaServer 局部变量（见上方 var uaServer = _uaServer），
+            // 而非直接访问 _uaServer 字段。Stop() 在另一线程可能将 _uaServer 置 null。
+            int actualVarCount = uaServer.VariableCount;
+            ushort nsIndex = uaServer.NamespaceIndex;
             Log($"  命名空间索引: {nsIndex}, 实际变量数: {actualVarCount}");
 
             _daClient.OnDataChanged += OnDaDataChanged;

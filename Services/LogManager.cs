@@ -89,6 +89,10 @@ catch (InvalidOperationException) { /* TextBox已销毁，忽略 */ }
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposeGuard, 1) != 0) return;
+            // H-11 修复：先设置 _disposed = true 再 CompleteAdding，消除竞态窗口。
+            // 若顺序反了，另一线程的 Append() 能通过 if (_disposed) 检查，再执行 TryAdd 时
+            // 队列已被标记为完成添加，抛 InvalidOperationException 并被 catch 吞掉，
+            // 注释写"TextBox已销毁"掩盖了真实原因。
             _disposed = true;
 
             _queue.CompleteAdding();
@@ -170,11 +174,12 @@ try { _fileWriter?.Dispose(); } catch (Exception ex) { Debug.WriteLine($"[Log] D
                             Debug.WriteLine(line);
                         }
                     }
-                    catch (NullReferenceException)
-                    {
-                        // 预期内：_fileWriter 为 null 时 WriteLine 会抛 NRE
-                        // 上面 IOException 块已处理重建，忽略此异常
-                    }
+                    // M-23 修复：移除显式 NullReferenceException catch——这是反模式。
+                    // 上方第135行已有 if (_fileWriter == null) continue; 保护，
+                    // 若此处仍出现 NRE 说明 null 检查自身有漏洞，应暴露而非吞掉。
+                    // 使用局部变量快照避免多线程间 _fileWriter 被置 null 的竞态：
+                    // var w = _fileWriter; if (w != null) w.WriteLine(line);
+                    // 注：当前 _fileWriter 仅由 WriterLoop 单线程访问，NRE 路径实际已消除。
                     catch (Exception ex)
                     {
                         Debug.WriteLine($"[Log] 日志写入未知错误: {ex.Message}");

@@ -9,9 +9,9 @@
     <LangVersion>8.0</LangVersion>
     <ApplicationIcon>..\opc-da-opc-ua.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.4.0</Version>
-    <AssemblyVersion>2.4.0.0</AssemblyVersion>
-    <FileVersion>2.4.0.0</FileVersion>
+    <Version>2.5.0</Version>
+    <AssemblyVersion>2.5.0.0</AssemblyVersion>
+    <FileVersion>2.5.0.0</FileVersion>
     <Company>OPC DA to UA Gateway</Company>
     <Product>OPC DA to OPC UA Gateway Watchdog</Product>
     <Description>OPC DA 到 OPC UA 网关看门狗进程监控</Description>

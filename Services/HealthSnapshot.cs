@@ -52,6 +52,10 @@ namespace OpcDaToUaGateway.Services
             Directory.CreateDirectory(_healthDir);
             _dailyFile = Path.Combine(_healthDir, "health_daily.jsonl");
 
+            // M-13 修复：在构造函数中初始化 _cachedProcess，避免每次 Capture 都创建新实例
+            // 产生不必要的 GC 压力（原字段存在但从未赋值使用）。
+            _cachedProcess = System.Diagnostics.Process.GetCurrentProcess();
+
             // 加载历史每日缓存
             LoadDailyCache();
         }
@@ -83,12 +87,14 @@ namespace OpcDaToUaGateway.Services
 
         /// <summary>
         /// 定时采集进程内存/CPU/UA节点等指标。
+        /// 由 MainForm._healthTimer.Tick 触发（H-14 修复：原为私有方法从未被调用）。
         /// </summary>
-        private void Capture()
+        public void Capture()
         {
             if (Volatile.Read(ref _disposedInt) == 1) return;
             if (!Monitor.TryEnter(_captureLock)) return;
 
+            string snapshotJson = null;
             try
             {
                 // 进入 Monitor 后二次检查，防止 Dispose 在另一线程执行后访问已释放的 _gatewayMgr
@@ -97,20 +103,23 @@ namespace OpcDaToUaGateway.Services
                 var snapshot = new SnapshotData
                 {
                     TimestampUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
-                    DaConnected = false,
-                    TotalUpdates = 0,
-                    UaVariableCount = 0,
+                    // H-13 修复：填充 DA 连接状态、更新计数、错误计数等核心指标。
+                    // 原先这些字段全部保持初始零值，健康文件记录的数据完全失真。
+                    DaConnected = _gatewayMgr?.DaClient?.IsConnected ?? false,
+                    TotalUpdates = _gatewayMgr?.Bridge?.TotalUpdates ?? 0,
+                    ErrorCount = _gatewayMgr?.Bridge?.ErrorCount ?? 0,
+                    UaVariableCount = (int?)(_gatewayMgr?.UaServer?.VariableCount) ?? 0,
                     WorkingSetMB = 0,
                     PrivateMemoryMB = 0,
                     GcTotalMemoryMB = 0,
                     UpdateRatePerSec = 0,
-                    ErrorCount = 0
                 };
 
-                // 进程内存指标
+                // 进程内存指标 — 使用构造函数中初始化的 _cachedProcess（M-13 修复）
                 try
                 {
-                    var proc = System.Diagnostics.Process.GetCurrentProcess();
+                    var proc = _cachedProcess ?? System.Diagnostics.Process.GetCurrentProcess();
+                    proc.Refresh();
                     snapshot.WorkingSetMB = proc.WorkingSet64 / (1024 * 1024);
                     snapshot.PrivateMemoryMB = proc.PrivateMemorySize64 / (1024 * 1024);
                     snapshot.GcTotalMemoryMB = GC.GetTotalMemory(false) / (1024 * 1024);
@@ -123,12 +132,10 @@ namespace OpcDaToUaGateway.Services
 
                 _lastCaptureTime = DateTime.Now;
 
-                // 写入当日快照文件
-                string today = DateTime.Now.ToString("yyyy-MM-dd");
-                string snapshotFile = Path.Combine(_healthDir, $"snapshots_{today}.jsonl");
-                File.AppendAllText(snapshotFile, JsonConvert.SerializeObject(snapshot) + Environment.NewLine);
-
-                RotateOldSnapshots();
+                // M-14/M-05 修复：在锁内构造好 JSON 字符串，锁外再写文件和执行 Rotate。
+                // RotateOldSnapshots() 执行 Directory.GetFiles + File.Delete，与快照写入同属
+                // 磁盘 I/O，一并移到锁外，避免持锁 I/O 阻塞 GenerateDailySummary。
+                snapshotJson = JsonConvert.SerializeObject(snapshot);
             }
             catch (Exception ex)
             {
@@ -137,6 +144,25 @@ namespace OpcDaToUaGateway.Services
             finally
             {
                 Monitor.Exit(_captureLock);
+            }
+
+            // M-05 修复：锁外写文件，避免持锁 I/O
+            if (snapshotJson != null)
+            {
+                try
+                {
+                    string today = DateTime.Now.ToString("yyyy-MM-dd");
+                    string snapshotFile = Path.Combine(_healthDir, $"snapshots_{today}.jsonl");
+                    File.AppendAllText(snapshotFile, snapshotJson + Environment.NewLine);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[健康快照] 写入快照文件失败: " + ex.Message);
+                }
+
+                // M-05 修复：RotateOldSnapshots 执行文件系统扫描和删除，也属磁盘 I/O，
+                // 一并移到锁外执行，与快照写入逻辑保持一致。
+                RotateOldSnapshots();
             }
         }
 
