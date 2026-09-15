@@ -56,8 +56,8 @@ namespace OpcDaToUaGateway.Services
                     else
                         UpdateTextBox(uiLine);
                 }
-catch (ObjectDisposedException) { /* Form已释放，忽略 */ }
-catch (InvalidOperationException) { /* 控件已销毁，忽略 */ }
+catch (ObjectDisposedException) { /* M-11 修正：Form 已释放，UI 更新无意义，有意忽略 */ }
+catch (InvalidOperationException) { /* M-11 修正：控件已销毁，UI 更新无意义，有意忽略 */ }
             }
 
             try

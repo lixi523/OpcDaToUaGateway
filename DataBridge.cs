@@ -42,7 +42,7 @@ namespace OpcDaToUaGateway
         private readonly List<string> _orderedKeys;
 
         // 缓存每个标签的 BuiltInType（避免每次数据变化时对 DataType 字符串做重复解析）
-        private readonly Dictionary<string, BuiltInType> _cachedTypes = new Dictionary<string, BuiltInType>();
+        private readonly ConcurrentDictionary<string, BuiltInType> _cachedTypes = new ConcurrentDictionary<string, BuiltInType>();
 
         // 运行时统计计数器，使用 Interlocked 保证跨线程原子性
         // 使用 long 防溢出。35K 标签每秒更新时，int 约 17 小时溢出。
@@ -204,19 +204,25 @@ namespace OpcDaToUaGateway
             ushort nsIndex = _uaServer.NamespaceIndex;
             Log($"  命名空间索引: {nsIndex}, 实际变量数: {actualVarCount}");
 
+            _daClient.OnDataChanged -= OnDaDataChanged;
+            // C-01 修复：订阅前先 -=，保证 Start() 重复调用时不累积重复订阅
+            _daClient.OnDataChanged -= OnDaDataChanged;
             _daClient.OnDataChanged += OnDaDataChanged;
             Log("数据桥接已启动，等待数据...");
         }
 
         /// <summary>
         /// 异步启动桥接：将变量节点创建移至后台线程，避免阻塞 UI 线程。
-        /// 
+        ///
         /// <para>V1.8.1 新增：针对 3.5 万+ 节点场景，在后台线程执行 AddVariableNode 循环，
         /// 通过 progressReport 回调报告进度。节点创建完成后订阅 DA 事件。
         /// 此方法确保 UI 线程在启动过程中始终保持响应。</para>
-        /// 
+        ///
         /// <para>V1.9.0 修复：快照 _uaServer 引用，防止 Stop() 在创建过程中将其置 null。</para>
-        /// 
+        ///
+        /// <para>V2.5.0 修复：订阅前先 -=，保证 Start()/StartAsync() 重复调用时
+        /// 不会累积重复订阅，避免单次 DA 回调触发 N 次数据投递。</para>
+        ///
         /// <param name="progressReport">进度回调，报告节点创建进度文本。可为 null。</param>
         /// </summary>
         public async Task StartAsync(Action<string> progressReport = null)
@@ -227,6 +233,7 @@ namespace OpcDaToUaGateway
             if (tagCount == 0)
             {
                 Log("[警告] 标签列表为空，没有可创建的 UA 变量节点。请检查 config.json 中的 Tags 配置。");
+                _daClient.OnDataChanged -= OnDaDataChanged;
                 _daClient.OnDataChanged += OnDaDataChanged;
                 Log("数据桥接已启动，等待数据...");
                 return;
@@ -292,10 +299,10 @@ namespace OpcDaToUaGateway
                     Log($"  ...及其他 {failedCount - 10} 个失败");
             }
 
-            // H-15 修复：使用已快照的 uaServer 局部变量（见上方 var uaServer = _uaServer），
-            // 而非直接访问 _uaServer 字段。Stop() 在另一线程可能将 _uaServer 置 null。
-            int actualVarCount = uaServer.VariableCount;
-            ushort nsIndex = uaServer.NamespaceIndex;
+            // C-03 修复：uaServer 为 null（Stop() 并发置空）时禁止 NRE，
+            // 使用空合并运算符安全取值。
+            int actualVarCount = uaServer?.VariableCount ?? 0;
+            ushort nsIndex = uaServer?.NamespaceIndex ?? 0;
             Log($"  命名空间索引: {nsIndex}, 实际变量数: {actualVarCount}");
 
             _daClient.OnDataChanged += OnDaDataChanged;

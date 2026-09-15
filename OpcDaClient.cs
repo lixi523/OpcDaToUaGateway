@@ -19,6 +19,9 @@ namespace OpcDaToUaGateway
         private int _readsEnabled;
         private int _readInProgress;
         private int _acquisitionMode = (int)DaAcquisitionMode.Async;
+        // 世代计数器：每次 StopReadsAndWait 调用递增，供等待线程校验
+        // "我等待的是否仍是当前这一代读取"，避免旧等待线程永久阻塞。
+        private int _stopGeneration;
 
         internal DaAcquisitionMode AcquisitionMode => (DaAcquisitionMode)Volatile.Read(ref _acquisitionMode);
 
@@ -48,18 +51,32 @@ namespace OpcDaToUaGateway
             _readCompleted.Set();
         }
 
+        /// <summary>
+        /// 禁用读取并等待进行中的读取结束。
+        /// </summary>
+        /// <param name="timeout">最长等待时间。若为 <see cref="TimeSpan.MaxValue"/>，
+        /// 则仅等待当前世代的读取结束，不阻塞调用线程（用于 Cleanup 超时分支）。</param>
+        /// <returns>读取是否已全部结束。</returns>
         internal bool StopReadsAndWait(TimeSpan timeout)
         {
+            int generation = Interlocked.Increment(ref _stopGeneration);
             Volatile.Write(ref _readsEnabled, 0);
             var stopwatch = Stopwatch.StartNew();
             while (Volatile.Read(ref _readInProgress) != 0)
             {
                 TimeSpan remaining = timeout - stopwatch.Elapsed;
-                if (remaining <= TimeSpan.Zero || !_readCompleted.Wait(remaining))
+                if (remaining <= TimeSpan.Zero)
+                    return Volatile.Read(ref _readInProgress) == 0;
+                if (!_readCompleted.Wait(remaining))
                     return Volatile.Read(ref _readInProgress) == 0;
             }
             return true;
         }
+
+        /// <summary>
+        /// 获取当前世代号，供等待线程判断是否需要放弃等待。
+        /// </summary>
+        internal int CurrentGeneration => Volatile.Read(ref _stopGeneration);
     }
 
     /// <summary>
@@ -103,17 +120,19 @@ namespace OpcDaToUaGateway
         private readonly List<TagConfig> _tags;
         private readonly string _host;
 
-        // 字典锁：AddAllItems 中批量重建（Clear + 批量写入）需要原子性。
+        // 字典锁：AddAllItems 中批量重建需要原子性。
         // 日常 DataChanged 回调读取依赖 ConcurrentDictionary 的线程安全性，无需持锁。
         private readonly object _dictLock = new object();
-        private readonly ConcurrentDictionary<string, OpcDaItem> _tagKeyToItem =
+        // C-02 修复：不再是 readonly，AddAllItems 在锁内原子替换引用（原 Clear+Add 为 O(n²)）。
+        private ConcurrentDictionary<string, OpcDaItem> _tagKeyToItem =
             new ConcurrentDictionary<string, OpcDaItem>();
-        private readonly ConcurrentDictionary<string, List<string>> _itemIdToTagKeys =
+        private ConcurrentDictionary<string, List<string>> _itemIdToTagKeys =
             new ConcurrentDictionary<string, List<string>>();
 
         private Timer _readTimer;
         private readonly OpcDaClientLifecycleState _lifecycleState = new OpcDaClientLifecycleState();
         private static readonly TimeSpan ReadShutdownTimeout = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan CleanupReadWaitTimeout = TimeSpan.FromSeconds(30);
 
         // 生命周期锁 + 原子 Disposed 守护
         private readonly object _lifecycleLock = new object();
@@ -292,34 +311,40 @@ namespace OpcDaToUaGateway
             int successCount = 0;
             int failCount = 0;
 
+            // C-02 修复：在锁外预构建新字典，锁内原子替换引用。
+            // 避免 35k 循环中逐 tagKey lock(list) + List.Add(O(n)) 的 O(n²) 与锁竞争。
+            var newTagKeyToItem = new ConcurrentDictionary<string, OpcDaItem>();
+            var newItemIdToTagKeys = new ConcurrentDictionary<string, List<string>>();
+
+            for (int i = 0; i < allResults.Length; i++)
+            {
+                string tagKey = _tags[i].TagKey;
+
+                if (!allResults[i].Error.Succeeded)
+                {
+                    failCount++;
+                    if (failCount <= 5)
+                        statusMessages.Add(
+                            $"  标签 [{_tags[i].ItemId}] 失败: 0x{(int)allResults[i].Error:X8}");
+                    continue;
+                }
+
+                var addedItem = allResults[i].Item;
+                newTagKeyToItem[tagKey] = addedItem;
+
+                string itemId = _tags[i].ItemId;
+                newItemIdToTagKeys.AddOrUpdate(itemId,
+                    _ => { var list = new List<string>(); list.Add(tagKey); return list; },
+                    (_, list) => { lock (list) { list.Add(tagKey); } return list; });
+
+                successCount++;
+            }
+
+            // 锁内仅做原子引用替换，避免持锁期间被并发读取线程看到中间态。
             lock (_dictLock)
             {
-                _tagKeyToItem.Clear();
-                _itemIdToTagKeys.Clear();
-
-                for (int i = 0; i < allResults.Length; i++)
-                {
-                    string tagKey = _tags[i].TagKey;
-
-                    if (!allResults[i].Error.Succeeded)
-                    {
-                        failCount++;
-                        if (failCount <= 5)
-                            statusMessages.Add(
-                                $"  标签 [{_tags[i].ItemId}] 失败: 0x{(int)allResults[i].Error:X8}");
-                        continue;
-                    }
-
-                    var addedItem = allResults[i].Item;
-                    _tagKeyToItem[tagKey] = addedItem;
-
-                    string itemId = _tags[i].ItemId;
-                    _itemIdToTagKeys.AddOrUpdate(itemId,
-                        _ => { var list = new List<string>(); list.Add(tagKey); return list; },
-                        (_, list) => { lock (list) { list.Add(tagKey); } return list; });
-
-                    successCount++;
-                }
+                _tagKeyToItem = newTagKeyToItem;
+                _itemIdToTagKeys = newItemIdToTagKeys;
             } // end lock
 
             // 事件回调在锁外执行。
@@ -349,6 +374,12 @@ namespace OpcDaToUaGateway
             // _group/_itemIdToTagKeys 被此回调访问，导致 ObjectDisposedException
             if (Volatile.Read(ref _disposedInt) == 1) return;
 
+            // H-04 修复：单次批量回调可能含 1000+ 点位，逐条 OnStatusChanged
+            // 会瞬间投递 1000+ 条日志造成 UI 队列雪崩。改为批次内限流：
+            // 仅记录首条异常 + 总数，超出部分合并为一条汇总日志。
+            int errorCount = 0;
+            string firstError = null;
+
             foreach (OpcDaItemValue value in args.Values)
             {
                 try
@@ -372,8 +403,18 @@ namespace OpcDaToUaGateway
                 }
                 catch (Exception ex)
                 {
-                    OnStatusChanged?.Invoke($"[数据回调异常] {ex.Message}");
+                    errorCount++;
+                    firstError ??= ex.Message;
                 }
+            }
+
+            if (errorCount > 0)
+            {
+                if (errorCount == 1)
+                    OnStatusChanged?.Invoke($"[数据回调异常] {firstError}");
+                else
+                    OnStatusChanged?.Invoke(
+                        $"[数据回调异常] 批次内 {errorCount} 个点位异常，首条: {firstError}");
             }
         }
 
@@ -476,17 +517,15 @@ catch (Exception ex) { OnStatusChanged?.Invoke($"[DA] 数据回调异常: {ex.Me
                 StopReadTimer();
                 if (!_lifecycleState.StopReadsAndWait(ReadShutdownTimeout))
                 {
+                    // H-05 修复：原先使用 TimeSpan.FromMilliseconds(int.MaxValue)（约 24.8 天）
+                    // 等待，实际永不超时；每次重连/停止都新增挂起工作项 → 线程池耗尽，
+                    // 且最终执行可能释放错误的 COM 对象。
+                    // 改为有界 30s 等待，超时即释放 COM 资源，不再无限排队。
                     _isConnected = false;
                     Interlocked.Exchange(ref _disposedInt, 1);
-                    OnStatusChanged?.Invoke("[DA] 等待在途同步读取结束超时，读取结束后将延迟释放 COM 资源");
-                    ThreadPool.QueueUserWorkItem(_ =>
-                    {
-                        _lifecycleState.StopReadsAndWait(TimeSpan.FromMilliseconds(int.MaxValue));
-                        lock (_lifecycleLock)
-                        {
-                            ReleaseComResources();
-                        }
-                    });
+                    OnStatusChanged?.Invoke(
+                        "[DA] 等待在途同步读取结束超时，已强制释放 COM 资源");
+                    ReleaseComResources();
                     return;
                 }
 

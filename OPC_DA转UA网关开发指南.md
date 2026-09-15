@@ -1,6 +1,6 @@
 ﻿# OPC DA 转 OPC UA 网关开发指南
 
-**版本：2.5.0**
+**版本：2.6.0**
 
 ## 项目概述
 
@@ -8,13 +8,14 @@ OpcDaToUaGateway 是一个 Windows 桌面应用程序，充当 OPC DA（基于 C
 
 **目标平台：** .NET Framework 4.7.2，x86（因 OPC DA COM 组件为 32 位）。
 
-**解决方案包含三个项目：**
+**解决方案包含两个项目：**
 
 | 项目 | 输出 | 用途 |
 |---|---|---|
 | OpcDaToUaGateway | OpcDaToUaGateway.exe (WinForms) | 主程序：UI、DA 客户端、UA 服务器、数据桥接、授权管理 |
 | OpcDaToUaGateway.Watchdog | OpcDaToUaGateway.Watchdog.exe (无依赖) | 独立进程：监控主程序并自动重启 |
-| OpcDaToUaGateway.Keygen | OpcDaToUaGateway.Keygen.exe (控制台) | 授权码计算工具：根据 PCID 生成授权码 |
+
+> **授权码生成工具（Keygen）**：不属于仓库源码，为独立的内部运维工具，**不随仓库与客户发布包分发**（详见 README 第 8 节）。授权码由管理员在内部环境生成后通过安全渠道提供给客户输入。
 
 **部署特点：** 通过 Costura.Fody 将所有托管依赖 DLL 嵌入主 exe，部署时无需附带外部 DLL 文件。
 
@@ -111,7 +112,7 @@ Program.cs (STA 入口 + 单实例 Mutex)
 ```
 OpcDaToUaGateway/
 ├── OpcDaToUaGateway.sln              # 解决方案文件（含三个项目）
-├── OpcDaToUaGateway.csproj           # 主项目文件（含版本号 2.5.0）
+├── OpcDaToUaGateway.csproj           # 主项目文件（含版本号 2.6.0）
 ├── FodyWeavers.xml                   # Costura.Fody DLL 嵌入配置
 ├── Program.cs                        # 应用程序入口 (STAThread + 单实例 Mutex)
 ├── MainForm.cs                       # 主窗口（UI 构建 + 协调各 Manager）
@@ -133,9 +134,6 @@ OpcDaToUaGateway/
 │   ├── ConfigManager.cs             # 配置管理（加载/保存/向后兼容/开机启动）
 │   ├── WatchdogManager.cs           # 看门狗管理（启停/进程清理/状态事件）
 │   └── GatewayManager.cs            # 网关生命周期（启动/停止/健康监控/DA重连）
-├── Keygen/
-│   ├── OpcDaToUaGateway.Keygen.csproj  # 授权码计算工具项目
-│   └── Program.cs                    # 控制台入口（交互模式 + 命令行模式）
 ├── Watchdog/
 │   ├── OpcDaToUaGateway.Watchdog.csproj
 │   └── Program.cs                    # 看门狗独立进程
@@ -838,6 +836,8 @@ public static bool VerifyAuthCode(string pcid, string authCode) // 验证授权�
 
 ### 11. 授权码计算工具 (Keygen)
 
+> **⚠️ 本工具不随仓库与客户发布包分发**（自 V2.6.0 起 `Keygen/` 目录已从仓库移除）。它属于内部运维工具，由管理员在内部环境独立维护，授权码通过安全渠道（加密邮件/内部系统）提供给客户输入。客户端仅支持输入授权码，**不可**自行生成。
+
 **职责：** 独立的控制台工具，根据目标机器的 PCID 计算授权码。
 
 **运行模式：**
@@ -849,7 +849,7 @@ public static bool VerifyAuthCode(string pcid, string authCode) // 验证授权�
 
 **EOF 处理（v1.3.4）：** 交互模式下 `Console.ReadLine()` 返回 null（stdin EOF，如管道关闭或 Ctrl+Z）时不再抛出 NullReferenceException，而是安全退出。
 
-**项目结构：** Keygen 项目通过 `<Compile Include>` 链接主项目的 `Models/LicenseAlgorithm.cs`，确保算法实现完全一致。编译时由主项目的 `BuildAndCopyKeygen` MSBuild Target 自动构建并复制到同一输出目录。
+**算法一致性：** Keygen 与主程序共享 `Models/LicenseAlgorithm.cs`（PCID 生成 + HMAC-SHA256 验证），两者必须使用相同的密钥与算法实现，否则生成的授权码无法通过主程序验证。
 
 ### 12. ItemSelectionDialog — 标签选择对话框
 
@@ -997,9 +997,9 @@ UI 日志文本框超过 100,000 字符时自动截断到后 50,000 字符。
 版本号在 `.csproj` 中统一管理：
 
 ```xml
-<Version>2.5.0</Version>
-<AssemblyVersion>2.5.0.0</AssemblyVersion>
-<FileVersion>2.5.0.0</FileVersion>
+<Version>2.6.0</Version>
+<AssemblyVersion>2.6.0.0</AssemblyVersion>
+<FileVersion>2.6.0.0</FileVersion>
 ```
 
 同时硬编码在以下位置（需同步更新）：
@@ -1170,7 +1170,7 @@ WMI 硬件标识（CPU ProcessorId、主板序列号、BIOS 序列号）在同�
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
-| **V2.5.0** | 2026-08-06 | **代码审查修复第二轮**：修复 `GatewayManager.StartAsync` 构造函数注入失效（局部变量覆盖字段）；`EffectiveMaxReconnectAttempts` 快照消除热更新 TOCTOU 与重连计数器提前停止；`GatewayOpcUaServer` 原子启动标志、`StopAsync` Volatile.Read、停止链 async lambda；`DataBridge` 字段竞态改用快照局部变量；`ConfigManager` 序列化异常后授权码恢复 + 防抖 Timer 字段化 + GUID 临时文件名；`HealthSnapshot.Capture()` 由私有未调用改为公共并由健康 Timer 触发，填充核心指标，文件 I/O 移出锁外；`Program.cs` 异常处理器前移到 Bootstrap 初始化之前；`ItemSelectionDialog` 远程 DA 主机支持 + 虚拟模式 OK 按钮修复；`LicenseManager` PCID 与试用状态文件异常处理；`TrialStateStore` DPAPI 作用域 `LocalMachine`→`CurrentUser`；`CsvTagExporter` 原子写入与 BOM 检测优化。主程序、Keygen、Watchdog 与 `AppConstants` 版本统一为 2.5.0；Debug/Release 0 警告 0 错误，测试 67/67 通过。 |
+| **V2.6.0** | 2026-08-06 | **代码审查修复第二轮**：修复 `GatewayManager.StartAsync` 构造函数注入失效（局部变量覆盖字段）；`EffectiveMaxReconnectAttempts` 快照消除热更新 TOCTOU 与重连计数器提前停止；`GatewayOpcUaServer` 原子启动标志、`StopAsync` Volatile.Read、停止链 async lambda；`DataBridge` 字段竞态改用快照局部变量；`ConfigManager` 序列化异常后授权码恢复 + 防抖 Timer 字段化 + GUID 临时文件名；`HealthSnapshot.Capture()` 由私有未调用改为公共并由健康 Timer 触发，填充核心指标，文件 I/O 移出锁外；`Program.cs` 异常处理器前移到 Bootstrap 初始化之前；`ItemSelectionDialog` 远程 DA 主机支持 + 虚拟模式 OK 按钮修复；`LicenseManager` PCID 与试用状态文件异常处理；`TrialStateStore` DPAPI 作用域 `LocalMachine`→`CurrentUser`；`CsvTagExporter` 原子写入与 BOM 检测优化。主程序、Keygen、Watchdog 与 `AppConstants` 版本统一为 2.6.0；Debug/Release 0 警告 0 错误，测试 67/67 通过。 |
 | **V2.4.0** | 2026-08-01 | **稳定性增强与版本发布**：试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 WinForms Timer 并在 UI 线程执行；OPC DA Sync 模式重连保持；同步 Read 增加重入门禁，停止或重连时等待在途 Read 后安全释放 COM；清理 `_gridTags` 既有警告；主程序、Keygen、Watchdog 与 `AppConstants` 版本统一为 2.4.0；Debug/Release 0 警告 0 错误，测试 66/66 通过。 |
 | **V2.3.0** | 2026-07-26 | **安全增强与代码质量优化**：授权码加密存储、回调与转换防护、ConfigManager 锁策略拆分、定时器与日志资源修复、SafeInvoke/FormClosing/TryReconnect 稳定性优化、AutoStartManager 分离及 BuildUI 拆分。 |
 | **V2.2.0** | 2026-07-23 | **全面代码审查修复**：String 类型标签显示修复、CSV 格式统一、按钮导航移除、图标更新、接口抽象与单元测试。编译 0 警告 0 错误。 |

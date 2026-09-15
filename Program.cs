@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -77,15 +78,19 @@ namespace OpcDaToUaGateway
             Application.ThreadException += (s, e) =>
             {
                 LogUnhandledException("UI线程异常", e.Exception);
-                // H-04 修复：MessageBox.Show 在 UI 控件不一致状态下可能引发二次异常，
-                // 用 try-catch 包裹，确保日志写入不被中断。
+                // H-07 修复：原为空 catch，MessageBox.Show 在 UI 控件不一致状态下
+                // 抛出的二次异常被完全吞掉，用户看不到任何反馈且崩溃日志写入失败。
+                // 改为捕获后至少写入 Debug 输出，确保异常不被静默丢弃。
                 try
                 {
                     MessageBox.Show(
                         $"程序遇到未处理异常:\n{e.Exception.Message}\n\n已记录到日志文件。",
                         "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
-                catch { }
+                catch (Exception ex2)
+                {
+                    Debug.WriteLine($"[程序] MessageBox.Show 二次异常，用户反馈未能显示: {ex2.Message}");
+                }
             };
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {

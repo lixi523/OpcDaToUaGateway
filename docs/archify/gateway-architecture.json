@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "OpcDaToUaGateway 运行时架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 700],
+    "views": [
+      {
+        "id": "main-path",
+        "label": "主数据路径",
+        "focus": ["da-srv", "da-cli", "bridge", "ua-srv", "clients"],
+        "note": "DA 采集 → 桥接 → UA 发布 → 客户端订阅。"
+      },
+      {
+        "id": "supervision",
+        "label": "守护与编排",
+        "focus": ["watchdog", "main-ui", "gateway-mgr", "health"],
+        "note": "看门狗保活、UI 启停、生命周期编排与健康快照。"
+      },
+      {
+        "id": "trust-licensing",
+        "label": "授权与信任边界",
+        "focus": ["license", "config-mgr", "dpapi", "keygen"],
+        "note": "授权体系及其外部信任锚点。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "da-srv", "type": "external", "label": "OPC DA 服务器", "sublabel": "COM/DCOM · Matrikon 等", "tag": "外部依赖", "pos": [40, 100], "size": [150, 66] },
+    { "id": "da-cli", "type": "backend", "label": "OpcDaClient", "sublabel": "TitaniumAS · 订阅/轮询", "pos": [318, 100], "size": [150, 66], "tag": "采集" },
+    { "id": "bridge", "type": "backend", "label": "DataBridge", "sublabel": "类型转换 · 快照缓存", "pos": [596, 100], "size": [150, 66], "tag": "桥接" },
+    { "id": "ua-srv", "type": "backend", "label": "GatewayOpcUaServer", "sublabel": "OPCF SDK · :4840 监听", "pos": [874, 100], "size": [160, 66], "tag": "发布" },
+    { "id": "clients", "type": "external", "label": "UA 客户端", "sublabel": "SCADA / MES", "tag": "外部依赖", "pos": [1162, 100], "size": [140, 66] },
+
+    { "id": "watchdog", "type": "security", "label": "Watchdog 进程", "sublabel": "10s 心跳 · 30s 判挂起", "tag": "独立进程", "pos": [20, 270], "size": [140, 62] },
+    { "id": "main-ui", "type": "frontend", "label": "MainForm UI", "sublabel": "WinForms · 托盘/日志", "pos": [280, 270], "size": [140, 62] },
+    { "id": "gateway-mgr", "type": "backend", "label": "GatewayManager", "sublabel": "编排: UA→DA→桥接", "pos": [581, 270], "size": [180, 62] },
+    { "id": "health", "type": "backend", "label": "HealthSnapshot", "sublabel": "5 分钟健康快照", "pos": [870, 270], "size": [140, 62] },
+
+    { "id": "log-mgr", "type": "database", "label": "LogManager", "sublabel": "队列缓冲 · 异步落盘", "pos": [280, 440], "size": [140, 62] },
+    { "id": "config-mgr", "type": "database", "label": "ConfigManager", "sublabel": "config.json · 防抖保存", "pos": [480, 440], "size": [140, 62] },
+    { "id": "license", "type": "security", "label": "LicenseManager", "sublabel": "试用累计 · 到期停服", "pos": [740, 440], "size": [140, 62] },
+    { "id": "dpapi", "type": "external", "label": "Windows DPAPI", "sublabel": "trial.dat 加密", "tag": "外部依赖", "pos": [1020, 440], "size": [130, 62] },
+    { "id": "keygen", "type": "external", "label": "Keygen 工具", "sublabel": "离线签发授权码", "tag": "离线工具", "pos": [1210, 440], "size": [130, 62] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "主进程 OpcDaToUaGateway.exe", "wraps": ["da-cli", "bridge", "ua-srv", "main-ui", "gateway-mgr", "health", "log-mgr", "config-mgr", "license"], "pad": 18 },
+    { "kind": "security-group", "label": "DCOM 信任边界", "wraps": ["da-srv"], "pad": 12 },
+    { "kind": "security-group", "label": "UA 网络边界", "wraps": ["clients"], "pad": 12 }
+  ],
+  "connections": [
+    { "from": "da-srv", "to": "da-cli", "label": "DCOM 数据回调", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "da-cli", "to": "bridge", "label": "OnValuesChanged", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "bridge", "to": "ua-srv", "label": "UpdateValue", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "ua-srv", "to": "clients", "label": "opc.tcp 订阅", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "watchdog", "to": "main-ui", "label": "崩溃/挂起重启", "fromSide": "right", "toSide": "left" },
+    { "from": "main-ui", "to": "gateway-mgr", "label": "启动/停止", "fromSide": "right", "toSide": "left" },
+    { "from": "gateway-mgr", "to": "bridge", "label": "生命周期编排", "route": "straight", "fromSide": "top", "toSide": "bottom" },
+    { "from": "health", "to": "gateway-mgr", "label": "状态采集", "fromSide": "left", "toSide": "right" },
+    { "from": "log-mgr", "to": "main-ui", "label": "日志落盘", "route": "straight", "fromSide": "top", "toSide": "bottom" },
+    { "from": "license", "to": "config-mgr", "label": "config.json 读写", "fromSide": "left", "toSide": "right" },
+    { "from": "license", "to": "dpapi", "label": "DPAPI 加解密", "fromSide": "right", "toSide": "left" },
+    { "from": "keygen", "to": "license", "label": "HMAC 授权码", "fromSide": "bottom", "toSide": "bottom", "via": [[1275, 580], [810, 580]] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "主数据路径（强调线）", "items": [
+      "OPC DA 服务器经 DCOM 回调推送数据变化",
+      "DataBridge 完成 DA→UA 类型转换与快照缓存",
+      "GatewayOpcUaServer 按 DA 层级映射地址空间",
+      "SCADA / MES 经 opc.tcp://<IP>:4840 订阅"
+    ] },
+    { "dot": "amber", "title": "信任边界与外部依赖", "items": [
+      "DCOM 边界：跨机器访问需 dcomcnfg 配置",
+      "UA 边界：SecurityMode 默认 None，监听 0.0.0.0:4840",
+      "DPAPI（CurrentUser）加解密 trial.dat 试用累计",
+      "Keygen 离线签发 HMAC 授权码，不参与运行时"
+    ] },
+    { "dot": "violet", "title": "高可用与运行约束", "items": [
+      "Watchdog 崩溃自动重启，30s 无心跳判挂起",
+      "CheckHealth 断线指数退避重连，上限 50 次",
+      "启动顺序 UA→DA→桥接，失败逆序回滚",
+      ".NET Fx 4.7.2 · x86 · STA · 3.5 万节点后台建库"
+    ] }
+  ]
+}

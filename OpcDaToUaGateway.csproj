@@ -13,9 +13,9 @@
     <ApplicationIcon>opc-da-opc-ua.ico</ApplicationIcon>
     <!-- 要求以管理员权限运行：嵌入清单文件，requestedExecutionLevel=requireAdministrator -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.5.0</Version>
-    <AssemblyVersion>2.5.0.0</AssemblyVersion>
-    <FileVersion>2.5.0.0</FileVersion>
+    <Version>2.6.0</Version>
+    <AssemblyVersion>2.6.0.0</AssemblyVersion>
+    <FileVersion>2.6.0.0</FileVersion>
     <Company>OPC DA to UA Gateway</Company>
     <Product>OPC DA to OPC UA Gateway</Product>
     <Description>OPC DA 到 OPC UA 协议转换网关</Description>
@@ -23,14 +23,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- 排除 Watchdog 和 Keygen 子项目自动生成的文件，避免 CS0579 重复程序集属性 -->
+    <!-- 排除 Watchdog 子项目自动生成的文件，避免 CS0579 重复程序集属性 -->
     <Compile Remove="Watchdog\**" />
     <None Remove="Watchdog\**" />
     <EmbeddedResource Remove="Watchdog\**" />
-    <Compile Remove="Keygen\**" />
     <Compile Remove="Tests\**" />
-    <None Remove="Keygen\**" />
-    <EmbeddedResource Remove="Keygen\**" />
   </ItemGroup>
 
   <ItemGroup>
@@ -70,12 +67,6 @@
   <Target Name="BuildAndCopyWatchdog" BeforeTargets="Build">
     <Exec Command="dotnet build &quot;$(MSBuildProjectDirectory)\Watchdog\OpcDaToUaGateway.Watchdog.csproj&quot; -c $(Configuration) -v q" />
     <Copy SourceFiles="Watchdog\bin\$(Configuration)\$(TargetFramework)\OpcDaToUaGateway.Watchdog.exe" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
-  </Target>
-
-  <!-- 编译授权码生成工具并复制到主程序输出目录 -->
-  <Target Name="BuildAndCopyKeygen" BeforeTargets="Build">
-    <Exec Command="dotnet build &quot;$(MSBuildProjectDirectory)\Keygen\OpcDaToUaGateway.Keygen.csproj&quot; -c $(Configuration) -v q" />
-    <Copy SourceFiles="Keygen\bin\$(Configuration)\$(TargetFramework)\OpcDaToUaGateway.Keygen.exe" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

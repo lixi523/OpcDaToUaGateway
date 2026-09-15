@@ -1,7 +1,7 @@
 # Handoff - OPC DA to UA Gateway (OpcDaToUaGateway) 项目交接文档
 
 > **生成时间：** 2026-09-15
-> **当前版本：** V2.5.0
+> **当前版本：** V2.6.0
 > **编译状态：** 0 警告 / 0 错误 ✅（Debug + Release）
 > **项目目录：** `D:\Documents\Code\OpcDa2Ua`
 
@@ -22,7 +22,7 @@
 | 维度 | 状态 |
 |---|---|
 | ponytail 代码清理（8 项） | ✅ 完成 |
-| 版本号升级 | ✅ V2.5.0（三个 `.csproj` + `AppConstants` 同步） |
+| 版本号升级 | ✅ V2.6.0（两个 `.csproj` + `AppConstants` 同步） |
 | 移除旧客户端列表功能 | ✅ 已移除 |
 | 启动延迟、未响应问题修复 | ✅ V1.8.1 完成，节点创建走后台线程 |
 | DA 标签真实数据类型获取 | ✅ V2.0.0 完成（临时 Group + CanonicalDataType） |

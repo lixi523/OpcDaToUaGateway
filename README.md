@@ -2,7 +2,7 @@
 
 ![Build](https://github.com/lixi523/OpcDaToUaGateway/actions/workflows/build.yml/badge.svg)
 
-> 版本：**V2.5.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
+> 版本：**V2.6.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
 
 ---
 
@@ -102,6 +102,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 | 版本 | 日期 | 变更摘要 |
 |---|---|---|
+| **V2.6.0** | 2026-09-15 | **代码审查报告 P0/P1 修复 + Keygen 目录仓库移除 + 版本升级**：① DataBridge 订阅幂等（Start/StartAsync 前先 -=）与 StartAsync null 安全取值；② OpcDaClient 批量重建字典 O(n²)→锁外预构建+锁内原子替换引用，readonly 字段改可赋值；③ OnValuesChanged 批次内异常限流（仅首条+计数）；④ Cleanup 超时分支由永不超时的 int.MaxValue 改为有界 30s 并直接释放 COM 资源，不再排队挂起工作项；⑤ Program 异常处理器空 catch 改为记录 Debug 二次异常；⑥ LogManager 空 catch 注释修正；⑦ DataBridge _cachedTypes 改 ConcurrentDictionary；⑧ Keygen/ 源码目录从仓库移除（本地保留，.gitignore 防止重新纳入），同步更新 csproj/sln/文档。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.5.0** | 2026-08-06 | **代码审查修复（第二轮）**：修复 GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）；EffectiveMaxReconnectAttempts 快照消除热更新TOCTOU；HealthSnapshot.RotateOldSnapshots 移到锁外；ConfigManager 临时文件改用GUID随机名；Program.cs 异常处理器前移到Bootstrap初始化之前并防护MessageBox二次异常；AutoStartManager WScript.Shell null 友好错误；测试修复：5处同步方法误用ThrowsAnyAsync改为ThrowsAny、DeriveKey断言优化、Task.Delay时序测试改用ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.4.0** | 2026-08-01 | **安全增强与稳定性优化**：授权码加密存储；试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 WinForms Timer；OPC DA 同步采集重连后保持 Sync 模式；同步读取增加单读取门禁与安全释放。当前测试 66/66 通过，0 警告 0 错误。 |
 | **V2.2.0** | 2026-07-23 | **全面代码审查修复**：String 类型标签显示修复、CSV 格式统一、按钮导航移除、图标更新、接口抽象与单元测试。编译 0 警告 0 错误。 |
@@ -148,4 +149,4 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 ---
 
-*本文档基于 V2.5.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
+*本文档基于 V2.6.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
