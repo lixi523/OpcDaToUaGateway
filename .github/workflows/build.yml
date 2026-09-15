@@ -41,16 +41,18 @@ jobs:
       - name: Build (Release)
         run: dotnet build OpcDaToUaGateway.sln -c Release -v minimal
 
-      - name: 打包版本化产物（排除 Keygen/Watchdog）
+      - name: 打包版本化产物（排除 Keygen，保留 Watchdog）
         shell: pwsh
         run: |
           $v = '${{ steps.version.outputs.APP_VERSION }}'
           $rel = "OpcDaToUaGateway-v$v"
           $source = "bin/Release/net472"
-          $exclude = @("OpcDaToUaGateway.Keygen.exe", "OpcDaToUaGateway.Watchdog.exe")
+          # 仅排除 Keygen（内部授权码生成工具，严禁随客户包分发）。
+          # Watchdog 守护进程保留，供需要崩溃自动重启的无人值守场景部署。
+          $exclude = @("OpcDaToUaGateway.Keygen.exe")
           New-Item -ItemType Directory -Force -Path $rel | Out-Null
 
-          # 客户发布包只包含主程序、必要 DLL、config.json；Keygen 和 Watchdog 均不得进入客户包
+          # 客户发布包包含主程序、必要 DLL、config.json 与 Watchdog 守护进程。
           if (Test-Path $source) {
             $sourcePath = (Resolve-Path $source).Path
             Get-ChildItem $source -Recurse | ForEach-Object {
@@ -66,7 +68,7 @@ jobs:
           }
 
           Compress-Archive -Path $rel -DestinationPath "$rel.zip" -Force
-          Write-Host "已生成版本化包: $rel.zip (已排除 Keygen/Watchdog)"
+          Write-Host "已生成版本化包: $rel.zip (已排除 Keygen，保留 Watchdog)"
 
       - name: 上传构建产物 (Artifact)
         uses: actions/upload-artifact@v4

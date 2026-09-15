@@ -210,13 +210,13 @@
 **安全背景**：Keygen 是内部授权码计算工具，若随客户发布包分发，客户可直接运行生成合法授权码，等同于破解商业授权体系。
 
 **实施措施**：
-- CI 流水线 `.github/workflows/build.yml` 改为白名单打包：Release 包中**明确排除 Keygen 和 Watchdog**
+- CI 流水线 `.github/workflows/build.yml` 改为白名单打包：Release 包中**明确排除 Keygen，保留 Watchdog**
 - 发布包内容对照：
 
 | 文件/目录 | 是否包含在客户发布包中 |
 |---|---|
 | `OpcDaToUaGateway.exe` | ✅ 包含（核心主程序） |
-| `OpcDaToUaGateway.Watchdog.exe` | ❌ 不包含（守护进程，非客户部署必需，且主程序可独立运行） |
+| `OpcDaToUaGateway.Watchdog.exe` | ✅ 包含（守护进程，供需要崩溃自动重启的无人值守场景部署） |
 | `OpcDaToUaGateway.Keygen.exe` | ❌ **严禁包含**（随发布包分发等同于破解授权体系） |
 | `config.json` | ✅ 包含（配置文件） |
 | `logs/` | ✅ 包含（运行时日志） |
