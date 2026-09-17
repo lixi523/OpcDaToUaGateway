@@ -94,7 +94,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
                        └────────┴───────┴──────────┘
 ```
 
-详细架构说明见 [`OPC_DA转UA网关开发指南.md`](OPC_DA转UA网关开发指南.md)。
+详细架构说明见 [`docs/OPC_DA转UA网关开发指南.md`](docs/OPC_DA转UA网关开发指南.md)。
 
 ---
 
@@ -102,7 +102,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
-| **V2.7.0** | 2026-09-17 | **V2.6.0 代码审查修复收尾 + 版本升级**：① H1 质量位修复，`OpcDaClient` 改用 `OpcDaQualityMaster` 数据质量位判定 Good/Bad，避免 BAD 质量被误标为 Good；② H2 DI 注入修复，`GatewayManager` 不再用 `as` 具体类型转型破坏接口注入；③ H3 看门狗心跳事件重启后周期性重试 `OpenExisting`，避免守护进程先启动时心跳检测永久失效；④ H4/M3 日志错配修复，`WatchdogManager` 收窄异常并修正日志文案；⑤ H5/L1/L2 `DataBridge` 订阅先 `-=` 再 `+=`，空标签 `StartAsync` 行为与 `Start` 统一；⑥ M1 常量清理，恢复 `AppConstants` 中相关常量为唯一来源并替换硬编码；⑦ M2/M4/M5/M6/L3-L7 完成节点上限诊断日志、UI 实时列、授权说明、版本单一来源等修复。Debug 0 警告 0 错误，67/67 测试通过。 |
+| **V2.7.0** | 2026-09-17 | **V2.6.0 代码审查修复收尾 + 版本升级**：① H1 质量位修复，`OpcDaClient` 改用 `OpcDaQualityMaster` 数据质量位判定 Good/Bad，避免 BAD 质量被误标为 Good；② H2 DI 注入修复，`GatewayManager` 不再用 `as` 具体类型转型破坏接口注入；③ H3 看门狗心跳事件重启后周期性重试 `OpenExisting`，避免守护进程先启动时心跳检测永久失效；④ H4/M3 日志错配修复，`WatchdogManager` 收窄异常并修正日志文案；⑤ H5/L1/L2 `DataBridge` 订阅先 `-=` 再 `+=`，空标签 `StartAsync` 行为与 `Start` 统一；⑥ M1 常量清理，恢复 `AppConstants` 中相关常量为唯一来源并替换硬编码；⑦ M2/M4/M5/M6/L3-L7 完成节点上限诊断日志、UI 实时列、授权说明、版本单一来源等修复。UI 修复：OPC DA 浏览窗口虚拟列表复选框鼠标点击勾选/取消不生效（`ItemCheck` 后刷新已显示行）；主界面“关于...”按钮文本还原。文档：开发指南等移入 `docs/`，新增 V2.6.0 审查报告，移除根目录旧文档。Debug 0 警告 0 错误，67/67 测试通过。 |
 | **V2.6.0** | 2026-09-15 | **代码审查报告 P0/P1 修复 + Keygen 目录仓库移除 + 版本升级**：① DataBridge 订阅幂等（Start/StartAsync 前先 -=）与 StartAsync null 安全取值；② OpcDaClient 批量重建字典 O(n²)→锁外预构建+锁内原子替换引用，readonly 字段改可赋值；③ OnValuesChanged 批次内异常限流（仅首条+计数）；④ Cleanup 超时分支由永不超时的 int.MaxValue 改为有界 30s 并直接释放 COM 资源，不再排队挂起工作项；⑤ Program 异常处理器空 catch 改为记录 Debug 二次异常；⑥ LogManager 空 catch 注释修正；⑦ DataBridge _cachedTypes 改 ConcurrentDictionary；⑧ Keygen/ 源码目录从仓库移除（本地保留，.gitignore 防止重新纳入），同步更新 csproj/sln/文档。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.5.0** | 2026-08-06 | **代码审查修复（第二轮）**：修复 GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）；EffectiveMaxReconnectAttempts 快照消除热更新TOCTOU；HealthSnapshot.RotateOldSnapshots 移到锁外；ConfigManager 临时文件改用GUID随机名；Program.cs 异常处理器前移到Bootstrap初始化之前并防护MessageBox二次异常；AutoStartManager WScript.Shell null 友好错误；测试修复：5处同步方法误用ThrowsAnyAsync改为ThrowsAny、DeriveKey断言优化、Task.Delay时序测试改用ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.4.0** | 2026-08-01 | **安全增强与稳定性优化**：授权码加密存储；试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 WinForms Timer；OPC DA 同步采集重连后保持 Sync 模式；同步读取增加单读取门禁与安全释放。当前测试 66/66 通过，0 警告 0 错误。 |
@@ -121,12 +121,13 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 | 文档 | 用途 | 读者 |
 | --- | --- | --- |
-| [`使用文档.md`](使用文档.md) | 安装部署、配置、操作、授权、日志、FAQ | 现场实施/运维 |
-| [`故障恢复预案.md`](故障恢复预案.md) | 9 类故障场景识别与恢复步骤 | 运维/值班 |
-| [`OPC_DA转UA网关开发指南.md`](OPC_DA转UA网关开发指南.md) | 架构、模块、版本演进史 | 开发者 |
+| [`docs/使用文档.md`](docs/使用文档.md) | 安装部署、配置、操作、授权、日志、FAQ | 现场实施/运维 |
+| [`docs/故障恢复预案.md`](docs/故障恢复预案.md) | 9 类故障场景识别与恢复步骤 | 运维/值班 |
+| [`docs/OPC_DA转UA网关开发指南.md`](docs/OPC_DA转UA网关开发指南.md) | 架构、模块、版本演进史 | 开发者 |
 | [`handoff.md`](handoff.md) | 交接说明与边界约定 | 接手开发者 |
-| [`STATUS.md`](STATUS.md) 当前状态与风险（含版本历史、编译状态、风险点） | 团队 |
-| [`本地编译步骤.md`](本地编译步骤.md) | 本机/CI 编译实操 | 构建负责人 |
+| [`docs/STATUS.md`](docs/STATUS.md) | 当前状态与风险（含版本历史、编译状态、风险点） | 团队 |
+| [`docs/本地编译步骤.md`](docs/本地编译步骤.md) | 本机/CI 编译实操 | 构建负责人 |
+| [`docs/代码审查报告_V2.6.0.md`](docs/代码审查报告_V2.6.0.md) | V2.6.0 全项目代码审查报告（H1-H5/M1-M6/L1-L7） | 开发者 |
 
 ---
 

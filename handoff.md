@@ -24,6 +24,7 @@
 | --- | --- |
 | ponytail 代码清理（8 项） | ✅ 完成 |
 | 代码审查修复（第三轮 V2.6.0 报告） | ✅ V2.7.0 完成：H1 质量位、H2 DI、H3 看门狗心跳重试、H4/M3 日志、H5 订阅幂等、M1 常量、M2/M4 UI、L1-L7 收尾 |
+| UI 复选框/按钮文本修复 | ✅ V2.7.0 完成：OPC DA 浏览窗口复选框鼠标点击勾选/取消生效；主界面按钮文本还原为“关于...” |
 | 版本号升级 | ✅ V2.7.0（两个 `.csproj` 同步，AppConstants 注释指向 OpcDaClient.AppVersion 单一来源） |
 | 移除旧客户端列表功能 | ✅ 已移除 |
 | 启动延迟、未响应问题修复 | ✅ V1.8.1 完成，节点创建走后台线程 |
@@ -274,7 +275,13 @@
 - **M1 常量**：恢复 `AppConstants.WatchdogHeartbeatMs / DaMaxReconnectAttempts / DefaultSessionTimeoutMs / UaDefaultPort` 为唯一来源，替换硬编码
 - **M2/M4/L3-L7**：节点上限诊断日志、UI 虚拟模式实时列、注释与版本来源整理
 
-**验证结果：** `dotnet build OpcDaToUaGateway.sln` 0 警告 0 错误；`dotnet test Tests/OpcDaToUaGateway.Tests.csproj` 67/67 通过。
+**UI 与文档附加修复：**
+
+- **OPC DA 浏览窗口复选框**：`ItemSelectionDialog` 虚拟模式下鼠标点击复选框勾选/取消不生效，`ItemCheck` 处理器更新数据后刷新已显示行（`Invalidate` + `Refresh`）
+- **主界面按钮文本**：`MainForm` 顶部按钮由“授权管理...”还原为“关于...”
+- **文档整理**：开发指南/使用文档/故障恢复预案/本地编译步骤移入 `docs/`，新增 `docs/代码审查报告_V2.6.0.md`，移除根目录旧文档
+
+**验证结果：** Debug 0 警告 0 错误，Release 0 警告 0 错误，67/67 测试通过；GitHub Release `v2.7.0` 已创建（tag 触发 CI）。
 
 ---
 
