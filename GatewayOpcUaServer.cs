@@ -474,8 +474,11 @@ namespace OpcDaToUaGateway
         /// 否则将消息存入早期缓冲队列，待 SubscribeDiagnostics 被调用时回放。
         /// 这样无论是 CreateAddressSpace（事件订阅前）还是 AddVariableNode（事件订阅后）
         /// 的诊断消息都不会丢失。
+        /// M2 修复（V2.6.0）：原方法标记 [Conditional("DEBUG")]，导致 Release 下节点
+        /// 超限被拒绝（数据保护逻辑）静默无日志。现去掉 Conditional，诊断消息统一
+        /// 走 OnDiagnostics → SubscribeDiagnostics → OnStatusChanged 通道，Release 下
+        /// 也可见。纯性能追踪类消息可改用其他机制。
         /// </summary>
-        [System.Diagnostics.Conditional("DEBUG")]
         private void Diag(string message)
         {
             if (OnDiagnostics != null)

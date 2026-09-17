@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Security.Cryptography;
 using System.Windows.Forms;
@@ -248,14 +247,8 @@ namespace OpcDaToUaGateway.Services
         }
 
         /// <summary>
-        /// 为旧版本配置文件中新引入的字段填充向后兼容默认值。
-        ///
-        /// 设计原则：
-        ///   - 对于不影响安全的功能字段（如 ListenAddress、Port），使用便利默认值让用户开箱即用
-        ///   - 对于安全敏感字段（如 AutoAcceptCertificates），通过检查 RawJson 中是否存在该字段名
-        ///     来区分"旧配置缺失"和"用户显式设置"：缺失时默认 false（安全优先），
-        ///     用户需在 UI 中显式启用
-        ///   - 对于数值型字段，值为 0 或负数视为"未设置"，填充合理的默认值
+        /// 会话数上限和超时时间：0 或负数表示旧配置未设置，填充生产环境合理值。
+        /// M1 修复（V2.6.0）：原为 120000/4840 硬编码，改由 AppConstants 集中管理。
         /// </summary>
         private void ApplyBackwardCompatDefaults()
         {
@@ -288,11 +281,11 @@ namespace OpcDaToUaGateway.Services
             if (ua.MaxSessionCount <= 0)
                 ua.MaxSessionCount = 50;
             if (ua.SessionTimeout <= 0)
-                ua.SessionTimeout = 120000;
+                ua.SessionTimeout = AppConstants.DefaultSessionTimeoutMs;
 
             // 端口号默认 4840（OPC UA 标准端口），防止 Port 为 0 时生成无效的端点地址
             if (ua.Port <= 0)
-                ua.Port = 4840;
+                ua.Port = AppConstants.UaDefaultPort;
 
             // 确保 OpcDa 配置节点存在
             if (Config.OpcDa == null)
@@ -416,7 +409,8 @@ namespace OpcDaToUaGateway.Services
                 // P1-1: 临时置 null Tags 以从 config.json 中排除标签数据。
                 if (Config.OpcDa != null) Config.OpcDa.Tags = null;
 
-                // S-3 修复：序列化前加密授权码，防止明文存储
+                // S-3 修复：序列化前加密授权码，避免明文存储（M5：实际强度等同异或混淆，
+                // 用于增加读取难度，非强加密；密钥与验证算法同源，详见 LicenseAlgorithm.GetEncryptionKey）
                 if (!string.IsNullOrEmpty(Config.AuthorizationCode))
                     Config.AuthorizationCode = EncryptAuthCode(Config.AuthorizationCode);
 

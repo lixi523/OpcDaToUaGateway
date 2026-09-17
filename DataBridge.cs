@@ -204,8 +204,8 @@ namespace OpcDaToUaGateway
             ushort nsIndex = _uaServer.NamespaceIndex;
             Log($"  命名空间索引: {nsIndex}, 实际变量数: {actualVarCount}");
 
-            _daClient.OnDataChanged -= OnDaDataChanged;
-            // C-01 修复：订阅前先 -=，保证 Start() 重复调用时不累积重复订阅
+            // L1 修复：原代码中 `-= OnDaDataChanged` 连写两遍（合并残留）。
+            // C-01 修复：订阅前先 -=，保证 Start() 重复调用时不累积重复订阅。
             _daClient.OnDataChanged -= OnDaDataChanged;
             _daClient.OnDataChanged += OnDaDataChanged;
             Log("数据桥接已启动，等待数据...");
@@ -233,6 +233,10 @@ namespace OpcDaToUaGateway
             if (tagCount == 0)
             {
                 Log("[警告] 标签列表为空，没有可创建的 UA 变量节点。请检查 config.json 中的 Tags 配置。");
+                // L2 修复（V2.6.0）：与 Start() 行为统一，空标签时也补 UA 节点统计日志，
+                // 避免 StartAsync 路径跳过统计导致运维无法区分"无标签"与"节点创建失败"。
+                // C-03 修复：uaServer 为 null（Stop() 并发置空）时禁止 NRE。
+                Log($"  命名空间索引: {_uaServer?.NamespaceIndex ?? 0}, 实际变量数: {_uaServer?.VariableCount ?? 0}");
                 _daClient.OnDataChanged -= OnDaDataChanged;
                 _daClient.OnDataChanged += OnDaDataChanged;
                 Log("数据桥接已启动，等待数据...");
@@ -305,6 +309,10 @@ namespace OpcDaToUaGateway
             ushort nsIndex = uaServer?.NamespaceIndex ?? 0;
             Log($"  命名空间索引: {nsIndex}, 实际变量数: {actualVarCount}");
 
+            // H5 修复：与 Start() 及 V2.5.0 注释一致，订阅前先 -= 防重复订阅。
+            // 生产路径走 StartAsync，原先只有 +=，异常回滚后重试会累积订阅，
+            // 单次数据变化触发 N 次投递。
+            _daClient.OnDataChanged -= OnDaDataChanged;
             _daClient.OnDataChanged += OnDaDataChanged;
             progressReport?.Invoke($"{logPrefix} 数据桥接已启动，等待数据...");
         }

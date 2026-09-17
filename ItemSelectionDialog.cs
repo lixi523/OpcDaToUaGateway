@@ -179,16 +179,21 @@ namespace OpcDaToUaGateway
                 e.Item = lvi;
             };
             
-            // 虚拟模式下处理勾选状态变化
+            // 虚拟模式下处理勾选状态变化：数据层已记录；再触发局部刷新，让被点击的复选框立即显示勾选/取消。
             _listView.ItemCheck += (s, e) =>
             {
                 if (e.Index < 0 || e.Index >= _displayItems.Count) return;
-                
+
                 var item = _displayItems[e.Index];
                 if (e.NewValue == CheckState.Checked)
                     _checkedItemIds.Add(item.ItemId);
                 else
                     _checkedItemIds.Remove(item.ItemId);
+
+                // V2.7.0 修复：鼠标点击复选框时，同步刷新已显示的虚拟项，
+                // 避免只改数据层而 UI 复选框不更新
+                _listView.Invalidate();
+                _listView.Refresh();
             };
 
             _listView.Columns.Add("ItemId", "ItemId", 320);

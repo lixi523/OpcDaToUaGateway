@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using OpcDaToUaGateway.Models;
 
 namespace OpcDaToUaGateway.Services.Interfaces
@@ -34,6 +35,13 @@ namespace OpcDaToUaGateway.Services.Interfaces
 
         /// <summary>启动数据桥接：订阅 DA 客户端的 OnDataChanged 事件并向 UA 服务器转发。</summary>
         void Start();
+
+        /// <summary>
+        /// 异步启动数据桥接：将变量节点创建移至后台线程，避免阻塞 UI 线程。
+        /// 节点创建完成后订阅 DA 事件。生产路径走 StartAsync。
+        /// </summary>
+        /// <param name="progressReport">进度回调，报告节点创建进度文本。可为 null。</param>
+        Task StartAsync(Action<string> progressReport = null);
 
         /// <summary>获取所有标签的当前值快照（按 TagKey 构造顺序排列）。</summary>
         IReadOnlyList<TagSnapshot> GetSnapshots();

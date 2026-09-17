@@ -239,6 +239,11 @@ namespace OpcDaToUaGateway.Services
 
         public void Dispose()
         {
+            // M6 说明（V2.6.0）：试用累计时长在 LicenseTimer_Tick 中每 60 秒持久化一次，
+            // 正常情况下 Dispose 退出时的保存失败丢失窗口 ≤1 分钟，可接受。
+            // 但 LicenseTimer_Tick 在保存失败时按"试用到期"严格处理，而 Dispose 失败
+            // 仅打日志，两者策略不对称：若磁盘故障持续，用户重启后试用时间会回退。
+            // 属已知取舍，保留现状（退出路径不能因磁盘故障阻断关闭），在此注明。
             if (!_isLicensed && _trialStopwatch != null && !TrySaveTrialState(GetCurrentElapsedSeconds()))
                 _log.Append("[授权] 退出时保存试用累计时间失败");
 

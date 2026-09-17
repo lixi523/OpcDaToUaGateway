@@ -197,7 +197,11 @@ namespace OpcDaToUaGateway.Watchdog
                 // 心跳事件由主进程创建，看门狗尝试打开它。
                 // 若主进程尚未启动（首次启动场景），心跳事件不存在是正常的，
                 // heartbeatEvent 保持 null，后续循环中跳过心跳检测。
+                // H3 修复：原先看门狗只在启动时 OpenExisting 一次，若先于主进程
+                // 启动则永久为 null、心跳检测整体失效。改为监控循环内周期性重试。
                 EventWaitHandle heartbeatEvent = null;
+                int heartbeatRetryCounter = 0;
+                const int HeartbeatRetryIntervalChecks = 6; // 6 次检查间隔 ≈ 30s 重试一次
                 try
                 {
                     heartbeatEvent = EventWaitHandle.OpenExisting(HeartbeatEventName);
@@ -205,7 +209,7 @@ namespace OpcDaToUaGateway.Watchdog
                 }
                 catch (WaitHandleCannotBeOpenedException)
                 {
-                    WriteLog("主进程心跳事件不存在（主进程尚未启动或版本不支持心跳）");
+                    WriteLog("主进程心跳事件不存在（主进程尚未启动或版本不支持心跳），将在监控循环内重试");
                 }
 
                 // ── 步骤 5: 进入监控循环 ──────────────────────────────────
@@ -228,8 +232,30 @@ namespace OpcDaToUaGateway.Watchdog
                     // 按进程名查找主进程。注意：进程名不含扩展名，
                     // 且可能匹配到同名但不同路径的进程。在当前部署场景下
                     // （单实例网关）这种风险可接受。
+                    // L7 修复（V2.6.0）：当前保留按名匹配，但注释明确首选方案是
+                    // 记录并锁定由看门狗拉起的主进程 PID；主窗口句柄在托盘化后不可靠。
                     var processes = Process.GetProcessesByName(processName);
                     bool isRunning = processes.Length > 0;
+
+                    // H3 修复：若初始打开失败（看门狗先于主进程启动），在主进程存活
+                    // 后周期性重试 OpenExisting，避免心跳检测功能永久失效。成本极低。
+                    if (heartbeatEvent == null && isRunning)
+                    {
+                        if (++heartbeatRetryCounter >= HeartbeatRetryIntervalChecks)
+                        {
+                            heartbeatRetryCounter = 0;
+                            try
+                            {
+                                heartbeatEvent = EventWaitHandle.OpenExisting(HeartbeatEventName);
+                                WriteLog("已连接到主进程心跳事件（监控循环内重试成功）");
+                            }
+                            catch (WaitHandleCannotBeOpenedException)
+                            {
+                                // 主进程可能尚未启动心跳定时器（如尚在启动早期），
+                                // 下一个窗口继续重试，不额外日志避免噪声。
+                            }
+                        }
+                    }
 
                     // ── 心跳检测（仅在进程存活且心跳事件可用时执行） ──────
                     // 采用两阶段检测策略：
@@ -293,7 +319,12 @@ namespace OpcDaToUaGateway.Watchdog
                                 finally { p.Dispose(); }
                             }
                         }
-                        catch { }
+                        catch (Exception ex)
+                        {
+                            // M3 修复：原代码是静默 catch{}，权限不足导致 GetProcessesByName
+                            // 失败时运维完全无感知。保留外层兑底但补日志。
+                            WriteLog($"终止挂起进程时发生未预期异常: {ex.Message}");
+                        }
                         // 强制标记为不存活，触发下方的重启逻辑
                         isRunning = false;
                     }

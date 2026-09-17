@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using TitaniumAS.Opc.Client;
 using TitaniumAS.Opc.Client.Common;
@@ -113,6 +114,18 @@ namespace OpcDaToUaGateway
     /// </summary>
     public class OpcDaClient : IOpcDaClient
     {
+        /// <summary>
+        /// 当前软件版本号 —— L6 修复（V2.6.0）：单一来源，直接从程序集
+        /// <see cref="AssemblyInformationalVersionAttribute"/> 反射读取（csproj 的
+        /// <Version>2.6.0</Version> 写入），与 Watchdog csproj 保持同一来源。
+        /// 反射失败时回退到 AssemblyVersion，避免启动期异常。
+        /// </summary>
+        public static string AppVersion =>
+            typeof(OpcDaClient).Assembly
+                .GetCustomAttributes(typeof(AssemblyInformationalVersionAttribute), false)
+                .Cast<AssemblyInformationalVersionAttribute>()
+                .FirstOrDefault()?.InformationalVersion
+                ?? typeof(OpcDaClient).Assembly.GetName().Version.ToString(3);
         private OpcDaServer _server;
         private OpcDaGroup _group;
 
@@ -171,13 +184,9 @@ namespace OpcDaToUaGateway
         }
 
         /// <summary>
-        /// 启动 OPC DA 客户端：连接到服务器、创建订阅组、添加标签点位、注册异步回调。
-        /// 如果连接过程中任何步骤失败，会自动调用 Cleanup() 释放已创建的资源并重新抛出异常。
-        /// </summary>
-        /// <param name="updateRateMs">订阅组的刷新率（毫秒），OPC DA 服务器按此周期推送数据变化。</param>
-        /// <summary>
         /// 启动 OPC DA 客户端：连接服务器、创建订阅、按指定数据获取方式注册回调或启动轮询。
         /// 如果连接过程中任何步骤失败，会自动调用 Cleanup() 释放已创建的资源并重新抛出异常。
+        /// L3 修复（V2.6.0）：清理旧版 Start(int) 签名的重复 XML 注释残留，仅保留当前双参签名。
         /// </summary>
         /// <param name="updateRateMs">刷新频率（毫秒），异步模式作为订阅推送周期、同步模式作为轮询周期。</param>
         /// <param name="mode">数据获取方式（异步订阅 / 同步轮询）。</param>
@@ -390,7 +399,10 @@ namespace OpcDaToUaGateway
                     string itemId = value.Item?.ItemId;
                     if (string.IsNullOrEmpty(itemId)) continue;
 
-                    bool isGood = value.Error.Succeeded;
+                    // H1 修复：原先 isGood 恒为 true，导致 DA 服务器返回 BAD 质量（设备掉线、传感器故障）
+                    // 的点位列被当作 Good 推给下游 SCADA。改用 TitaniumAS 的 OpcDaQuality 数据质量位：
+                    // Master（主质量类别）== Good 才视为 Good，Bad/Uncertain/Error 均按 Bad 投递，让下游看到真实质量。
+                    bool isGood = value.Quality.Master == OpcDaQualityMaster.Good;
                     DateTime timestamp = value.Timestamp.LocalDateTime;
 
                     if (_itemIdToTagKeys.TryGetValue(itemId, out var tagKeys))
@@ -478,7 +490,9 @@ namespace OpcDaToUaGateway
                         string itemId = value.Item?.ItemId;
                         if (string.IsNullOrEmpty(itemId)) continue;
 
-                        bool isGood = value.Error.Succeeded;
+                        // H1 修复（与 OnValuesChanged 保持一致）：基于 OpcDaQuality.Master 判定质量位，
+                        // Bad/Uncertain/Error 均按 Bad 投递，避免 DA 侧 BAD 质量被误标为 Good。
+                        bool isGood = value.Quality.Master == OpcDaQualityMaster.Good;
                         DateTime timestamp = value.Timestamp.LocalDateTime;
 
                         if (_itemIdToTagKeys.TryGetValue(itemId, out var tagKeys))
@@ -1018,6 +1032,10 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
                 tempGroup = server.AddGroup("_TempBrowseGroup", groupState);
                 logger($"[DataType] 创建临时浏览 Group，准备填充 {items.Count} 个点位的数据类型");
 
+                // M1 修复（V2.6.0）：数据类型探测批次（500）与 AddAllItems 的批量大小
+                // （DaAddItemBatchSize=2000）语义不同：前者控制临时浏览 Group 单次 AddItems
+                // 的数据量（服务器 CanonicalDataType 探测），后者控制正式订阅 Group 添加点位
+                // 的批量大小。独立常量避免误用。
                 const int batchSize = 500;
                 for (int batchStart = 0; batchStart < items.Count; batchStart += batchSize)
                 {

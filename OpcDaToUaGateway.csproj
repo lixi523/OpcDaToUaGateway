@@ -13,9 +13,9 @@
     <ApplicationIcon>opc-da-opc-ua.ico</ApplicationIcon>
     <!-- 要求以管理员权限运行：嵌入清单文件，requestedExecutionLevel=requireAdministrator -->
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>2.6.0</Version>
-    <AssemblyVersion>2.6.0.0</AssemblyVersion>
-    <FileVersion>2.6.0.0</FileVersion>
+    <Version>2.7.0</Version>
+    <AssemblyVersion>2.7.0.0</AssemblyVersion>
+    <FileVersion>2.7.0.0</FileVersion>
     <Company>OPC DA to UA Gateway</Company>
     <Product>OPC DA to OPC UA Gateway</Product>
     <Description>OPC DA 到 OPC UA 协议转换网关</Description>

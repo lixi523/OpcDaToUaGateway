@@ -79,8 +79,9 @@ namespace OpcDaToUaGateway.Services
         /// <remarks>
         /// M6 修复：从硬编码常量改为可从配置读取的值。
         /// 默认 50 次，<see cref="OpcDaConfig.MaxReconnectAttempts"/> 为非正数时使用此默认值。
+        /// M1 修复（V2.6.0）：原为本地 50 硬编码，改由 AppConstants.DaMaxReconnectAttempts 集中管理。
         /// </remarks>
-        private const int MaxReconnectAttemptsDefault = 50;
+        private const int MaxReconnectAttemptsDefault = AppConstants.DaMaxReconnectAttempts;
 
         /// <summary>
         /// 获取当前有效的最大重连次数。
@@ -179,9 +180,13 @@ namespace OpcDaToUaGateway.Services
             // 下方的 `if (xxx == null) xxx = new ...` 判断局部变量，永远为 null，
             // 构造函数注入的字段值（_uaServer/_daClient/_bridge）完全被忽略，DI 失效。
             // 修复：从字段读取初始值，注入非 null 时直接使用，null 时才创建真实实例。
-            GatewayOpcUaServer uaServer = _uaServer as GatewayOpcUaServer;
-            OpcDaClient daClient = _daClient as OpcDaClient;
-            DataBridge bridge = _bridge as DataBridge;
+            // H2 修复：之前用 `as 具体类型` 转型，注入 FakeOpcDaClient/FakeGatewayOpcUaServer
+            // 时转型结果为 null，DI 被静默丢弃、重建真实对象。字段本就声明为接口类型
+            // （_daClient/_uaServer/_bridge 在 :38-40），直接用接口类型驱动；仅当接口缺失
+            // 成员时才需收紧，但 StopAsync(:286-299) 已全用接口类型，证明接口足够。
+            IGatewayOpcUaServer uaServer = _uaServer;
+            IOpcDaClient daClient = _daClient;
+            IDataBridge bridge = _bridge;
 
             try
             {
@@ -387,7 +392,11 @@ try { uaServer.Dispose(); } catch (Exception ex) { _log.Append($"[网关] UA Ser
 
                 if (attempts > maxAttempts)
                 {
-                    Interlocked.CompareExchange(ref _reconnectAttempts, maxAttempts + 1, attempts);
+                    // L5 修复（V2.6.0）：原代码用 Interlocked.CompareExchange 钳位，绕且不易读。
+                    // 此处 attempts 已经是本线程 Increment 的返回值，若超出 maxAttempts+1
+                    // 直接原子钳到 maxAttempts+1 即可；并发下其他线程可能同时钳位但结果一致，
+                    // 且后续重连成功路径会清零，不会累积偏差。
+                    Interlocked.Exchange(ref _reconnectAttempts, maxAttempts + 1);
                     attempts = maxAttempts + 1;
                 }
 

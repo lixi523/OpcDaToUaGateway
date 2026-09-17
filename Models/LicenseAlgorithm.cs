@@ -98,6 +98,11 @@ namespace OpcDaToUaGateway
         /// <summary>
         /// 获取 AES 加密密钥，用于加密配置文件中存储的授权码。
         /// 授权码不再明文存储，使用 AES-256-CBC 加密后写入 config.json。
+        /// M5 说明（V2.6.0）：密钥与 VerifyAuthCode 验证算法同源、均硬编码在客户端，
+        /// 能反编译出验证逻辑的攻击者必然能解出 AES 密钥 —— 这里 AES-256-CBC 的
+        /// 实际强度等同于异或混淆。此设计属于防拷贝/防篡改的行业常态（防君子不防
+        /// 小人），主要作用是"增加读取难度"而非强加密；若需 he机器指纹绑定可改为
+        /// PCID → KDF → key，使 config.json 拷贝到他机无法解密。
         /// </summary>
         public static byte[] GetEncryptionKey() => DeriveKey();
 

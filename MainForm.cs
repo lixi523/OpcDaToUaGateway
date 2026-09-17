@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -45,6 +46,9 @@ namespace OpcDaToUaGateway
         private Label _lblWatchdogStatus;
         private DataGridView _dgvTags;
         private IReadOnlyList<TagSnapshot> _cachedSnapshots; // 缓存的快照引用，避免重复读取（接口 IDataBridge.GetSnapshots 返回类型）
+        // M4 修复（V2.6.0）：虚拟模式下缓存的 TagKey/DisplayName 列数据
+        private string[] _tagGridKeys = Array.Empty<string>();
+        private string[] _tagGridNames = Array.Empty<string>();
         private TextBox _txtLog;
         private Timer _refreshTimer;
 
@@ -340,7 +344,7 @@ namespace OpcDaToUaGateway
 
             var btnAbout = new Button
             {
-                Text = "授权管理...", Location = new Point(780, 15), Size = new Size(120, 28),
+                Text = "关于...", Location = new Point(780, 15), Size = new Size(120, 28),
                 FlatStyle = FlatStyle.Flat, BackColor = Theme.Primary, ForeColor = Color.White, Cursor = Cursors.Hand
             };
             btnAbout.FlatAppearance.BorderSize = 0;
@@ -373,13 +377,20 @@ namespace OpcDaToUaGateway
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 BackgroundColor = Theme.Surface, ForeColor = Theme.TextPrimary,
-                BorderStyle = BorderStyle.None
+                BorderStyle = BorderStyle.None,
+                // M4 修复（V2.6.0）：启用虚拟模式。原先 Rows.Add 填静态 TagKey/DisplayName，
+                // 但 RefreshStats 又按虚拟模式驱动 RowCount + Invalidate，两套数据源混淆，
+                // 导致值/质量/时间戳三列永远显示空字符串。现改为虚拟模式：
+                // RowCount 由 RefreshStats 驱动，CellValueNeeded 从 _cachedSnapshots 填实时值。
+                VirtualMode = true
             };
             _dgvTags.Columns.Add("TagKey", "标识");
             _dgvTags.Columns.Add("DisplayName", "显示名称");
             _dgvTags.Columns.Add("Value", "值");
             _dgvTags.Columns.Add("Quality", "质量");
             _dgvTags.Columns.Add("Timestamp", "时间戳");
+            _dgvTags.CellValueNeeded += DgvTags_CellValueNeeded;
+            _dgvTags.CellFormatting += DgvTags_CellFormatting;
 
             grpMonitor.Controls.Add(_dgvTags);
             Controls.Add(grpMonitor);
@@ -558,10 +569,20 @@ namespace OpcDaToUaGateway
         private void UpdateTagGrid(List<TagConfig> tags)
         {
             if (_dgvTags == null) return;
-            _dgvTags.Rows.Clear();
-            if (tags == null) return;
-            foreach (var tag in tags)
-                _dgvTags.Rows.Add(tag.TagKey, tag.DisplayName, "", "", "");
+            // M4 修复（V2.6.0）：虚拟模式下不再逐行 Rows.Add。
+            // 先缓存 TagKey/DisplayName 列表（只在前两列需要），
+            // 再设 RowCount = 总标签数，由 RefreshStats 驱动 CellValueNeeded。
+            if (tags == null)
+            {
+                _tagGridKeys = Array.Empty<string>();
+                _tagGridNames = Array.Empty<string>();
+                _dgvTags.RowCount = 0;
+                return;
+            }
+            _tagGridKeys = tags.Select(t => t.TagKey).ToArray();
+            _tagGridNames = tags.Select(t => t.DisplayName).ToArray();
+            _dgvTags.RowCount = tags.Count;
+            _dgvTags.Invalidate();
         }
 
         private static Button CreateButton(string text, Color color, Point location)
@@ -983,7 +1004,10 @@ namespace OpcDaToUaGateway
             if (_gatewayMgr?.Bridge == null) return;
 
             _cachedSnapshots = _gatewayMgr.Bridge.GetSnapshots();
-            _dgvTags.RowCount = _cachedSnapshots.Count;
+            // M4 修复（V2.6.0）：虚拟模式下 RowCount 由 UpdateTagGrid 设置的静态标签数驱动，
+            // 不再随快照变动。CellValueNeeded 根据 _cachedSnapshots 填实时值。
+            if (_dgvTags.RowCount != _tagGridKeys.Length)
+                _dgvTags.RowCount = _tagGridKeys.Length;
             _dgvTags.Invalidate();
 
             // 自适应刷新间隔
@@ -1016,7 +1040,50 @@ namespace OpcDaToUaGateway
             return hash;
         }
         /// <summary>
+        /// M4 修复（V2.6.0）：虚拟模式单元格值回调。
+        /// 从 _cachedSnapshots 按行号读取实时值，填入 Value/Quality/Timestamp 列；
+        /// TagKey/DisplayName 两列从 _tagGridKeys/_tagGridNames 静态缓存读取。
+        /// 原先没有此回调，导致虚拟模式下三列实时数据永远显示为空字符串。
+        /// </summary>
+        private void DgvTags_CellValueNeeded(object sender, DataGridViewCellValueEventArgs e)
+        {
+            // 边界保护：行号超出当前缓存范围（如 RefreshStats 刚拿到新快照但 RowCount 尚未更新）
+            if (e.RowIndex < 0 || e.RowIndex >= _dgvTags.RowCount) return;
+
+            switch (e.ColumnIndex)
+            {
+                case 0: // TagKey
+                    e.Value = e.RowIndex < _tagGridKeys.Length ? _tagGridKeys[e.RowIndex] : string.Empty;
+                    break;
+                case 1: // DisplayName
+                    e.Value = e.RowIndex < _tagGridNames.Length ? _tagGridNames[e.RowIndex] : string.Empty;
+                    break;
+                case 2: // Value
+                case 3: // Quality
+                case 4: // Timestamp
+                    // 从 _cachedSnapshots 读取实时数据
+                    var snapshot = _cachedSnapshots;
+                    if (snapshot != null && e.RowIndex < snapshot.Count)
+                    {
+                        var s = snapshot[e.RowIndex];
+                        if (e.ColumnIndex == 2)
+                            e.Value = s.Value?.ToString() ?? "";
+                        else if (e.ColumnIndex == 3)
+                            e.Value = s.Quality;
+                        else
+                            e.Value = s.Timestamp.ToString("HH:mm:ss");
+                    }
+                    else
+                    {
+                        e.Value = "";
+                    }
+                    break;
+            }
+        }
+
+        /// <summary>
         /// 虚拟模式回调：设置单元格显示样式（质量列颜色）。
+        /// M4 修复（V2.6.0）：补充了 += 绑定（原先没有任何订阅，质量列颜色逻辑实际未生效）。
         /// </summary>
         private void DgvTags_CellFormatting(object sender, DataGridViewCellFormattingEventArgs e)
         {

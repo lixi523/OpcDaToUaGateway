@@ -91,12 +91,11 @@ namespace OpcDaToUaGateway.Services
         /// </summary>
         internal const string ExitOkEventName = "OpcDaToUaGateway_GracefulExit";
 
-        /// <summary>
-        /// 心跳发送间隔 (10 秒)。
+        /// <summary>心跳发送间隔 (10 秒)。
         /// 选择 10 秒是因为看门狗超时阈值为 30 秒（3 个周期），
         /// 10 秒间隔允许偶发一次心跳丢失（如 GC 暂停、系统繁忙）而不会触发误杀。
-        /// </summary>
-        private const int HeartbeatIntervalMs = 10000;
+        /// M1 修复（V2.6.0）：原为本地 10000 硬编码，改由 AppConstants.WatchdogHeartbeatMs 集中管理。</summary>
+        private const int HeartbeatIntervalMs = AppConstants.WatchdogHeartbeatMs;
 
         // ─── 实例字段 ────────────────────────────────────────────────────
 
@@ -210,9 +209,11 @@ namespace OpcDaToUaGateway.Services
                     {
                         // 名称冲突（极端罕见，如操作系统级命名空间冲突），
                         // 不重试以避免无限循环，仅记录日志。心跳功能降级但看门狗仍可通过进程检测工作。
+                        // L4 修复（V2.6.0）：补充 StatusChanged 同步告知 UI，避免运维对降级状态无感知。
                         _heartbeatTimer?.Dispose();
                         _heartbeatTimer = null;
                         _log.Append("[守护] 心跳事件名称冲突，心跳监控不可用");
+                        StatusChanged?.Invoke("● 守护: 心跳不可用", System.Drawing.Color.Orange);
                     }
 
                     // 启动心跳定时器。
@@ -239,6 +240,9 @@ namespace OpcDaToUaGateway.Services
                     // 如果上一次是用户主动退出（设了 GracefulExitEvent），而看门狗还活着，
                     // 新启动的主进程必须 Reset 该信号，否则下次主进程崩溃时
                     // 看门狗会误判为"优雅退出"而不去重启。
+                    // M3 修复：原代码 catch (Exception) 把"事件不存在"（看门狗尚未创建）
+                    // 这个合法情形也报为"进程监控失败"。收窄到 WaitHandleCannotBeOpenedException
+                    // （事件不存在的合法情形）；其他异常才报"意外错误"。
                     try
                     {
                         using (var exitOk = EventWaitHandle.OpenExisting(ExitOkEventName))
@@ -246,7 +250,14 @@ namespace OpcDaToUaGateway.Services
                             exitOk.Reset();
                         }
                     }
-catch (Exception ex) { _log.Append($"[看门狗] 进程监控失败: {ex.Message}"); }
+                    catch (WaitHandleCannotBeOpenedException)
+                    {
+                        // 合法情形：看门狗尚未创建该事件，无需清除，静默跳过
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.Append($"[守护] 清除优雅退出信号失败: {ex.Message}");
+                    }
 
                     StatusChanged?.Invoke("● 守护: 运行中", System.Drawing.Color.Green);
                     _log.Append("[守护] 看门狗进程已启动");
@@ -289,7 +300,9 @@ try { _heartbeatEvent?.Dispose(); } catch (Exception ex) { _log.Append($"[看门
                 _heartbeatEvent = null;
 
                 // 第二步：通过命名事件通知看门狗退出（优雅方式）。
-                // OpenExisting 可能失败（如看门狗从未启动过），静默忽略。
+                // OpenExisting 可能失败（如看门狗从未启动过），
+                // M3 修复：收窄到 WaitHandleCannotBeOpenedException（事件不存在的合法情形）静默跳过；
+                // Set() 失败才报“发送停止信号失败”（原来误标为“启动看门狗失败”）。
                 try
                 {
                     using (var stopEvent = System.Threading.EventWaitHandle.OpenExisting(StopEventName))
@@ -297,7 +310,14 @@ try { _heartbeatEvent?.Dispose(); } catch (Exception ex) { _log.Append($"[看门
                         stopEvent.Set();
                     }
                 }
-catch (Exception ex) { _log.Append($"[看门狗] 启动看门狗失败: {ex.Message}"); }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    // 合法情形：看门狗从未启动过，停止信号无需发送，直接进入下方强杀兑底
+                }
+                catch (Exception ex)
+                {
+                    _log.Append($"[看门狗] 发送停止信号失败: {ex.Message}");
+                }
 
                 // 第三步：等待看门狗自行退出。
                 // 看门狗检测到 StopEvent 后会退出循环，通常需要几十毫秒。

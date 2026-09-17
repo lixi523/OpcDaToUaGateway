@@ -19,14 +19,11 @@ namespace OpcDaToUaGateway
         /// <summary>单次 DA AddItems 的批量大小（减少 COM 往返次数）</summary>
         public const int DaAddItemBatchSize = 2000;
 
-        /// <summary>浏览分页大小（避免 DCOM 20s 超时，与 OpcDaClient.BrowsePageSize 保持一致）</summary>
+        /// <summary>浏览分页大小（避免 DCOM 20s 超时）</summary>
         public const int DaBrowsePageSize = 500;
 
         /// <summary>定时同步读取间隔 (ms) — 作为 DA 订阅的兜底补充</summary>
         public const int DaSyncIntervalMs = 300000; // 5 分钟
-
-        /// <summary>浏览日志进度输出间隔（每收集 N 个点位输出一次）</summary>
-        public const int DaBrowseProgressInterval = 2000;
 
         /// <summary>DA 浏览最大条目数上限</summary>
         public const int DaMaxBrowseItems = 50000;
@@ -35,6 +32,16 @@ namespace OpcDaToUaGateway
         // 100000 个 BaseDataVariableState 约 500MB，作为安全阈值
         public const int MaxVariableNodes = 100000;
 
+        // M1 清理（V2.6.0）：以下常量此前在代码中无引用，实际值在各处硬编码。
+        // 为避免“集中管理常量”变成最大的 Magic Number 来源、调参时改了不生效的陷阱，
+        // 将硬编码处改为引用本类后，这些常量即为唯一来源：
+        //   WatchdogHeartbeatMs      ← Services/WatchdogManager.cs HeartbeatIntervalMs
+        //   DaMaxReconnectAttempts   ← Services/GatewayManager.cs MaxReconnectAttemptsDefault
+        //   DefaultSessionTimeoutMs   ← Services/ConfigManager.cs ApplyBackwardCompatDefaults
+        //   UaDefaultPort            ← Services/ConfigManager.cs ApplyBackwardCompatDefaults
+        // 纯死常量（DaBrowseProgressInterval / LogQueueCapacity / LogFlushInterval /
+        // HealthSnapshotIntervalMinutes）已删除。
+
         // ══════════════════════════════════════════════════
         //  OPC UA 相关
         // ══════════════════════════════════════════════════
@@ -42,21 +49,12 @@ namespace OpcDaToUaGateway
         /// <summary>扁平标签批量分组大小 — 每批最多 N 个变量，超过则创建新的 Batch 子文件夹</summary>
         public const int UaFlatBatchSize = 1000;
 
-        /// <summary>命名空间索引默认值 — NS0=OPC UA base, NS1=server URI, NS2=custom</summary>
-        public const ushort UaDefaultNamespaceIndex = 2;
-
-        /// <summary>默认 UA 服务器端口</summary>
+        /// <summary>默认 UA 服务器端口（OPC UA 标准端口）— M1：ConfigManager 默认值引用此常量</summary>
         public const int UaDefaultPort = 4840;
 
         // ══════════════════════════════════════════════════
         //  日志管理
         // ══════════════════════════════════════════════════
-
-        /// <summary>文件日志队列容量 — 超出后丢弃（防止慢磁盘拖垮网关）</summary>
-        public const int LogQueueCapacity = 50000;
-
-        /// <summary>每次批量 Flush 的行数 — 平衡磁盘 I/O 与崩溃数据丢失风险</summary>
-        public const int LogFlushInterval = 10;
 
         /// <summary>触发过期日志清理的写入次数间隔</summary>
         public const int LogCleanupInterval = 500;
@@ -74,17 +72,14 @@ namespace OpcDaToUaGateway
         //  看门狗 & 健康监控
         // ══════════════════════════════════════════════════
 
-        /// <summary>心跳发送间隔 (ms)</summary>
+        /// <summary>心跳发送间隔 (ms) — M1：WatchdogManager 心跳定时器引用此常量</summary>
         public const int WatchdogHeartbeatMs = 10000;
 
-        /// <summary>DA 连接断开后最大自动重连次数</summary>
+        /// <summary>DA 连接断开后最大自动重连次数 — M1：GatewayManager 默认值引用此常量</summary>
         public const int DaMaxReconnectAttempts = 50;
 
         /// <summary>健康检查间隔 (ms)</summary>
         public const int HealthCheckIntervalMs = 10000;
-
-        /// <summary>健康快照采集间隔（分钟）— 默认每 5 分钟采集一次进程健康指标</summary>
-        public const int HealthSnapshotIntervalMinutes = 5;
 
         // ══════════════════════════════════════════════════
         //  配置
@@ -93,7 +88,7 @@ namespace OpcDaToUaGateway
         /// <summary>配置保存防抖延迟 (ms) — 多次快速修改合并为一次写入</summary>
         public const int ConfigDebounceMs = 500;
 
-        /// <summary>默认会话超时 (ms)</summary>
+        /// <summary>默认会话超时 (ms) — M1：ConfigManager 向后兼容默认值引用此常量</summary>
         public const int DefaultSessionTimeoutMs = 120000;
 
         /// <summary>默认 OPC DA 主机名</summary>
@@ -119,8 +114,10 @@ namespace OpcDaToUaGateway
         //  版本
         // ══════════════════════════════════════════════════
 
-        /// <summary>当前软件版本</summary>
-        public const string AppVersion = "2.6.0";
+        // L6 修复（V2.6.0）：删除硬编码 AppVersion 常量，改为单一来源 ——
+        // OpcDaClient.AppVersion 从 AssemblyInformationalVersion 反射读取（csproj <Version>2.7.0</Version>），
+        // 与 Watchdog csproj 保持同一来源，避免"改了常量不生效"的陷阱。
+        // 如需在 UI 显示版本号，请引用 OpcDaClient.AppVersion 或 AboutDialog 的 AppVersion。
 
         /// <summary>窗口标题（不含版本号）</summary>
         public const string WindowTitle = "OPC DA → OPC UA 网关";

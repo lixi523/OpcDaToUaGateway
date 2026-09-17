@@ -2,7 +2,7 @@
 
 ![Build](https://github.com/lixi523/OpcDaToUaGateway/actions/workflows/build.yml/badge.svg)
 
-> 版本：**V2.6.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
+> 版本：**V2.7.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
 
 ---
 
@@ -43,7 +43,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 ## 3. 核心功能
 
 | 功能 | 说明 |
-|---|---|
+| --- | --- |
 | OPC DA 浏览 | 自动遍历 DA 服务器层级结构，获取标签名、路径、数据类型 |
 | UA 地址空间映射 | 按 DA 层级自动创建 VariableNode，保持相同树形结构 |
 | 实时数据同步 | 支持异步订阅（推荐）和同步轮询两种模式 |
@@ -101,7 +101,8 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 ## 6. 版本历史
 
 | 版本 | 日期 | 变更摘要 |
-|---|---|---|
+| --- | --- | --- |
+| **V2.7.0** | 2026-09-17 | **V2.6.0 代码审查修复收尾 + 版本升级**：① H1 质量位修复，`OpcDaClient` 改用 `OpcDaQualityMaster` 数据质量位判定 Good/Bad，避免 BAD 质量被误标为 Good；② H2 DI 注入修复，`GatewayManager` 不再用 `as` 具体类型转型破坏接口注入；③ H3 看门狗心跳事件重启后周期性重试 `OpenExisting`，避免守护进程先启动时心跳检测永久失效；④ H4/M3 日志错配修复，`WatchdogManager` 收窄异常并修正日志文案；⑤ H5/L1/L2 `DataBridge` 订阅先 `-=` 再 `+=`，空标签 `StartAsync` 行为与 `Start` 统一；⑥ M1 常量清理，恢复 `AppConstants` 中相关常量为唯一来源并替换硬编码；⑦ M2/M4/M5/M6/L3-L7 完成节点上限诊断日志、UI 实时列、授权说明、版本单一来源等修复。Debug 0 警告 0 错误，67/67 测试通过。 |
 | **V2.6.0** | 2026-09-15 | **代码审查报告 P0/P1 修复 + Keygen 目录仓库移除 + 版本升级**：① DataBridge 订阅幂等（Start/StartAsync 前先 -=）与 StartAsync null 安全取值；② OpcDaClient 批量重建字典 O(n²)→锁外预构建+锁内原子替换引用，readonly 字段改可赋值；③ OnValuesChanged 批次内异常限流（仅首条+计数）；④ Cleanup 超时分支由永不超时的 int.MaxValue 改为有界 30s 并直接释放 COM 资源，不再排队挂起工作项；⑤ Program 异常处理器空 catch 改为记录 Debug 二次异常；⑥ LogManager 空 catch 注释修正；⑦ DataBridge _cachedTypes 改 ConcurrentDictionary；⑧ Keygen/ 源码目录从仓库移除（本地保留，.gitignore 防止重新纳入），同步更新 csproj/sln/文档。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.5.0** | 2026-08-06 | **代码审查修复（第二轮）**：修复 GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）；EffectiveMaxReconnectAttempts 快照消除热更新TOCTOU；HealthSnapshot.RotateOldSnapshots 移到锁外；ConfigManager 临时文件改用GUID随机名；Program.cs 异常处理器前移到Bootstrap初始化之前并防护MessageBox二次异常；AutoStartManager WScript.Shell null 友好错误；测试修复：5处同步方法误用ThrowsAnyAsync改为ThrowsAny、DeriveKey断言优化、Task.Delay时序测试改用ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.4.0** | 2026-08-01 | **安全增强与稳定性优化**：授权码加密存储；试用累计运行时间使用 Windows DPAPI 持久化；自动启动收敛为单一 WinForms Timer；OPC DA 同步采集重连后保持 Sync 模式；同步读取增加单读取门禁与安全释放。当前测试 66/66 通过，0 警告 0 错误。 |
@@ -119,7 +120,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 ## 7. 文档索引
 
 | 文档 | 用途 | 读者 |
-|---|---|---|
+| --- | --- | --- |
 | [`使用文档.md`](使用文档.md) | 安装部署、配置、操作、授权、日志、FAQ | 现场实施/运维 |
 | [`故障恢复预案.md`](故障恢复预案.md) | 9 类故障场景识别与恢复步骤 | 运维/值班 |
 | [`OPC_DA转UA网关开发指南.md`](OPC_DA转UA网关开发指南.md) | 架构、模块、版本演进史 | 开发者 |
@@ -149,4 +150,4 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 ---
 
-*本文档基于 V2.6.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
+*本文档基于 V2.7.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
