@@ -677,7 +677,8 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
         /// 全部子元素，其内部通过 OPC DA 3.0 的 dwMaxElementsReturned 控制单次数量。
         /// </summary>
         public static List<OpcDaItemInfo> BrowseAllItems(
-            string serverProgId, string host = "localhost", Action<string> logger = null)
+            string serverProgId, string host = "localhost", Action<string> logger = null,
+            Action<IReadOnlyList<OpcDaItemInfo>> onItemsDiscovered = null)
         {
             if (string.IsNullOrWhiteSpace(host)) host = AppConstants.DefaultDaHost;
 
@@ -705,18 +706,79 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
                     var items = new List<OpcDaItemInfo>();
                     var browser = new OpcDaBrowserAuto(server);
                     Log($"[Browse] 浏览器类型: {browser.GetType().Name}");
-                    BrowseRecursive(browser, items, MaxBrowseDepth,
-                        currentDepth: 0, parentItemId: null, logger: Log);
 
-                    Log($"[Browse] 浏览完成，共获取 {items.Count} 个点位");
+                    // 边扫描边显示：每积累 DaBrowseStreamChunk 个点位，就把「增量」投递出去，
+                    // 避免点位量大（>1 万）时长时间列表为空、让用户以为扫描不到点位。
+                    // 只投递新增部分（GetRange 返回的是同一批对象引用，后续类型填充会就地更新）。
+                    int reportedCount = 0;
+                    void StreamProgress(bool force)
+                    {
+                        if (onItemsDiscovered == null || items.Count == reportedCount) return;
+                        if (!force && items.Count - reportedCount < AppConstants.DaBrowseStreamChunk) return;
+                        var delta = items.GetRange(reportedCount, items.Count - reportedCount);
+                        reportedCount = items.Count;
+                        onItemsDiscovered(delta);
+                    }
+
+                    var swBrowse = System.Diagnostics.Stopwatch.StartNew();
+                    BrowseRecursive(browser, items, MaxBrowseDepth,
+                        currentDepth: 0, parentItemId: null, logger: Log,
+                        streamProgress: () => StreamProgress(false));
+
+                    // 兜底：TitaniumAS 的 OpcBrowse.Browse 内部 catch(Exception){break;} 会吞掉 COM 异常
+                    // 并返回空数组，使 OpcDaBrowserAuto 在「返回空但未抛异常」时不会回退到 DA2/DA1；
+                    // 而 FLAT 命名空间服务器（历史库类，如 pSpace）往往只有 DA2 的 OPC_FLAT 枚举能列出点位
+                    // （参见 OPC Foundation issue #878：FLAT 服务器 BrowseOPCItemIDs 需传 OPC_FLAT）。
+                    // 因此：主策略拿到 0 点位时，显式改用 OpcDaBrowser2 / OpcDaBrowser1 重试。
+                    if (items.Count == 0)
+                    {
+                        foreach (IOpcDaBrowser alt in new IOpcDaBrowser[] { new RootSafeBrowser2(server), new OpcDaBrowser2(server), new OpcDaBrowser1(server) })
+                        {
+                            try
+                            {
+                                var probe = alt.GetElements(null);
+                                Log($"[Browse] 主策略返回 0 点位，试用备用浏览器 {alt.GetType().Name}：根层 {probe?.Length ?? 0} 个元素");
+                                if (probe != null && probe.Length > 0)
+                                {
+                                    BrowseRecursive(alt, items, MaxBrowseDepth,
+                                        currentDepth: 0, parentItemId: null, logger: Log,
+                                        streamProgress: () => StreamProgress(false));
+                                    if (items.Count > 0) break;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"[Browse] 备用浏览器 {alt.GetType().Name} 失败: {ex.Message}");
+                            }
+                        }
+                    }
+
+                    // 终极端兜底：分层浏览与备用浏览器都拿不到点位时，改用 DA2 的 OPC_FLAT 全量枚举。
+                    // OPC_FLAT 会「把地址空间当作扁平的」一次性列出本层及所有子层，是 FLAT 命名空间
+                    // 及部分非标准分层服务器唯一可用的枚举方式（其它 OPC 客户端能扫到标签，多半走的这条路）。
+                    if (items.Count == 0)
+                    {
+                        Log("[Browse] 分层/备用浏览均未获取到点位，改用 OPC_FLAT 全量枚举...");
+                        TryFlatEnumerate(server, items, Log);
+                    }
+
+                    swBrowse.Stop();
+                    StreamProgress(force: true);   // 补齐最后不足一块的剩余点位
+
+                    Log($"[Browse] 浏览阶段完成，共获取 {items.Count} 个点位，耗时 {swBrowse.ElapsedMilliseconds} ms");
                     if (items.Count == 0)
                     {
                         Log($"[Browse] ⚠️ 警告: 浏览返回 0 个点位！请检查:");
                         Log($"[Browse]   1. OPC DA 服务器是否正常运行且有已配置的标签");
                         Log($"[Browse]   2. 服务器地址空间结构是否为分支嵌套（非扁平根节点）");
                         Log($"[Browse]   3. 可使用 OPC 客户端工具（如 Matrikon OPC Explorer）验证");
-                    }                    // 通过临时 Group 获取真实数据类型
+                    }
+
+                    // 通过临时 Group 获取真实数据类型（仅探测类型仍未知的点位）
+                    var swTypes = System.Diagnostics.Stopwatch.StartNew();
                     FillRealDataTypes(server, browser, items, Log);
+                    swTypes.Stop();
+                    Log($"[Browse] 数据类型填充阶段完成，耗时 {swTypes.ElapsedMilliseconds} ms");
 
                     return items;
                 }
@@ -866,6 +928,82 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
         }
 
         /// <summary>
+        /// 终极端兜底：直接用 DA2 的 OPC_FLAT 枚举整个地址空间（把地址空间当扁平，一次列出本层及所有子层）。
+        /// <para>部分服务器（FLAT 命名空间、或分层浏览实现不标准）常规 Browse 拿不到点位，却支持 OPC_FLAT。
+        /// 其它 OPC 客户端能扫到标签，走的通常是这条路。</para>
+        /// </summary>
+        /// <returns>新增的点位数。</returns>
+        private static int TryFlatEnumerate(OpcDaServer server, List<OpcDaItemInfo> items, Action<string> logger)
+        {
+            try
+            {
+                var addr = server.As<TitaniumAS.Opc.Client.Da.Wrappers.OpcBrowseServerAddressSpace>();
+                if (addr == null)
+                {
+                    logger("[Browse] FLAT 枚举：服务器不支持 IOPCBrowseServerAddressSpace");
+                    return 0;
+                }
+
+                string[] names = addr.BrowseOpcItemIds(
+                    TitaniumAS.Opc.Client.Da.Browsing.OpcDaBrowseType.Flat,
+                    null,
+                    System.Runtime.InteropServices.VarEnum.VT_EMPTY,
+                    TitaniumAS.Opc.Client.Da.OpcDaAccessRights.Ignore);
+
+                logger($"[Browse] FLAT 枚举返回 {names?.Length ?? 0} 个名称");
+                if (names == null || names.Length == 0) return 0;
+
+                int added = 0;
+                foreach (var name in names)
+                {
+                    if (items.Count >= AppConstants.DaMaxBrowseItems) break;
+                    if (string.IsNullOrEmpty(name)) continue;
+
+                    string itemId = name;
+                    try { itemId = addr.GetItemId(name) ?? name; }
+                    catch (Exception ex) { logger($"[Browse] FLAT GetItemId('{name}') 失败，回退用名称: {ex.Message}"); }
+
+                    if (string.IsNullOrEmpty(itemId)) continue;
+
+                    items.Add(new OpcDaItemInfo
+                    {
+                        ItemId = itemId,
+                        Name = name,
+                        DataTypeName = AppConstants.UnknownDataType,
+                        Description = ""
+                    });
+                    added++;
+                }
+
+                logger($"[Browse] FLAT 枚举新增 {added} 个点位");
+                return added;
+            }
+            catch (Exception ex)
+            {
+                logger($"[Browse] FLAT 枚举失败: {ex.Message} (0x{ex.HResult:X8})");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// <see cref="OpcDaBrowser2"/> 的「根层友好」版本。
+        /// <para>部分服务器（实测 pSpace.OPCServer）对 `ChangeBrowsePosition(OPC_BROWSE_TO, "")`
+        /// 返回 E_FAIL，而 <see cref="OpcDaBrowser2.GetElements"/> 在枚举前会先做该调用，
+        /// 于是根层枚举直接失败（Browser1 因根层用 OPC_BROWSE_UP 回根而不受影响）。
+        /// 根层本就在根位置，无需 BROWSE_TO，故此处对空 itemId 直接跳过。</para>
+        /// </summary>
+        private sealed class RootSafeBrowser2 : OpcDaBrowser2
+        {
+            public RootSafeBrowser2(OpcDaServer server) : base(server) { }
+
+            protected override void ChangeBrowsePositionTo(string itemId)
+            {
+                if (string.IsNullOrEmpty(itemId)) return;   // 根层：保持在根，不做 BROWSE_TO
+                base.ChangeBrowsePositionTo(itemId);
+            }
+        }
+
+        /// <summary>
         /// 递归浏览 OPC DA 服务器的节点树，收集所有叶子点位。
         /// </summary>
         private static void BrowseRecursive(
@@ -874,7 +1012,8 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
             int maxDepth,
             int currentDepth,
             string parentItemId,
-            Action<string> logger = null)
+            Action<string> logger = null,
+            Action streamProgress = null)
         {
             if (currentDepth > maxDepth) return;
             if (items.Count >= AppConstants.DaMaxBrowseItems)
@@ -897,6 +1036,8 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
                 if (elements == null || elements.Length == 0)
                 {
                     logger?.Invoke($"[Browse] 分支 [{branchLabel}] 返回 0 个元素 (深度={currentDepth})");
+                    if (currentDepth == 0)
+                        logger?.Invoke("[Browse] 根层统计: 共 0 元素（服务器根层未返回任何元素）");
                     return;
                 }
 
@@ -939,16 +1080,28 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
                             $"(当前分支: {branchLabel}, 本层: {leafCount}叶/{branchCount}枝/{otherCount}其他)");
                     }
 
-                    // 递归探索子节点
-                    if (element.HasChildren && currentDepth < maxDepth)
+                    // 边扫描边显示：把新增点位按块增量投递（内部按 DaBrowseStreamChunk 节流）
+                    streamProgress?.Invoke();
+
+                    // 递归探索子节点。
+                    // 下钻条件放宽为「非点位元素一律尝试下钻」：OPC 语义上 IsItem==false 即分支，
+                    // 而部分服务器（实测 pSpace.OPCServer）不设置 OPC_BROWSE_HASCHILDREN 标志，
+                    // 若只认 HasChildren 会漏掉整棵子树（表现为根层有元素却 0 点位）。
+                    // 空分支下钻只会多一次返回 0 的 GetElements，且深度上限 MaxBrowseDepth 保证有界。
+                    if (!element.IsItem && !string.IsNullOrEmpty(element.ItemId) && currentDepth < maxDepth)
                         BrowseRecursive(browser, items, maxDepth,
-                            currentDepth + 1, element.ItemId, logger);
+                            currentDepth + 1, element.ItemId, logger, streamProgress);
                 }
 
                 // 分支摘要日志：每层统计叶子和子分支数量
                 logger?.Invoke(
                     $"[Browse] 分支 [{branchLabel}] (深度={currentDepth}): " +
                     $"共 {elements.Length} 元素, {leafCount} 叶子, {branchCount} 分支, {otherCount} 其他");
+                if (currentDepth == 0)
+                    logger?.Invoke(
+                        $"[Browse] 根层统计: 共 {elements.Length} 元素, {leafCount} 叶子, {branchCount} 分支, {otherCount} 其他");
+                // 分支结束再补一次增量投递，确保跨分支累积的新增点位及时显形
+                streamProgress?.Invoke();
             }
             catch (Exception ex)
             {
@@ -1025,22 +1178,37 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
         {
             if (items == null || items.Count == 0) return;
 
+            // 只探测「类型仍未知」的点位：若浏览阶段已带回数据类型，则无需再走一遍临时 Group 的
+            // AddItems，可显著减少大规模点位（>1 万）场景下的 COM 往返。
+            var pending = new List<OpcDaItemInfo>(items.Count);
+            foreach (var it in items)
+            {
+                if (string.IsNullOrEmpty(it.DataTypeName) || it.DataTypeName == AppConstants.UnknownDataType)
+                    pending.Add(it);
+            }
+
+            if (pending.Count == 0)
+            {
+                logger($"[DataType] {items.Count} 个点位已在浏览阶段获得数据类型，跳过临时 Group 探测");
+                return;
+            }
+
             OpcDaGroup tempGroup = null;
             try
             {
                 var groupState = new OpcDaGroupState { IsActive = false, ClientHandle = 0, UpdateRate = TimeSpan.FromMilliseconds(1000) };
                 tempGroup = server.AddGroup("_TempBrowseGroup", groupState);
-                logger($"[DataType] 创建临时浏览 Group，准备填充 {items.Count} 个点位的数据类型");
+                logger($"[DataType] 创建临时浏览 Group，准备填充 {pending.Count}/{items.Count} 个点位的数据类型");
 
                 // M1 修复（V2.6.0）：数据类型探测批次（500）与 AddAllItems 的批量大小
                 // （DaAddItemBatchSize=2000）语义不同：前者控制临时浏览 Group 单次 AddItems
                 // 的数据量（服务器 CanonicalDataType 探测），后者控制正式订阅 Group 添加点位
                 // 的批量大小。独立常量避免误用。
                 const int batchSize = 500;
-                for (int batchStart = 0; batchStart < items.Count; batchStart += batchSize)
+                for (int batchStart = 0; batchStart < pending.Count; batchStart += batchSize)
                 {
-                    int batchEnd = Math.Min(batchStart + batchSize, items.Count);
-                    var batch = items.GetRange(batchStart, batchEnd - batchStart);
+                    int batchEnd = Math.Min(batchStart + batchSize, pending.Count);
+                    var batch = pending.GetRange(batchStart, batchEnd - batchStart);
 
                     var definitions = new List<OpcDaItemDefinition>();
                     foreach (var item in batch)
@@ -1048,10 +1216,10 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
 
                     OpcDaItemResult[] results = tempGroup.AddItems(definitions);
 
-                    for (int i = 0; i < results.Length && (batchStart + i) < items.Count; i++)
+                    for (int i = 0; i < results.Length && i < batch.Count; i++)
                     {
                         var result = results[i];
-                        var itemInfo = items[batchStart + i];
+                        var itemInfo = batch[i];
                         if (result.Error == HRESULT.S_OK && result.Item != null)
                         {
                             var dt = result.Item.CanonicalDataType;
@@ -1067,7 +1235,7 @@ try { _readTimer.Dispose(); } catch (Exception ex) { OnStatusChanged?.Invoke($"[
                     logger($"[DataType] 批次 {batchStart / batchSize + 1} 完成 ({batch.Count} 个点位)");
                 }
 
-                logger($"[DataType] 所有 {items.Count} 个点位的数据类型填充完成");
+                logger($"[DataType] 完成 {pending.Count} 个点位的数据类型填充");
             }
             catch (Exception ex)
             {

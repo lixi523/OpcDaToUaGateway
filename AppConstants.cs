@@ -28,6 +28,13 @@ namespace OpcDaToUaGateway
         /// <summary>DA 浏览最大条目数上限</summary>
         public const int DaMaxBrowseItems = 50000;
 
+        /// <summary>
+        /// 浏览过程中向 UI 增量投递点位的分块大小。
+        /// 每积累 N 个点位就把增量推给对话框，实现「边扫描边显示」，
+        /// 避免点位量大（&gt;1 万）时长时间列表为空、让用户以为扫描不到点位。
+        /// </summary>
+        public const int DaBrowseStreamChunk = 1000;
+
         // H-33: 变量节点缓存上限 — 防止配置错误导致 OOM
         // 100000 个 BaseDataVariableState 约 500MB，作为安全阈值
         public const int MaxVariableNodes = 100000;

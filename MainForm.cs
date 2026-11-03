@@ -68,6 +68,9 @@ namespace OpcDaToUaGateway
 
         // ---- 授权 ----
         private Label _lblLicenseStatus;
+        // 试用到期且未授权时为 true：禁用「启动网关」，但允许重新打开软件、浏览点位、
+        // 在「关于」中输入授权码；授权成功后置 false 并恢复正常使用。
+        private bool _licenseLocked;
 
         // ---- 系统托盘 ----
         private NotifyIcon _notifyIcon;
@@ -513,7 +516,9 @@ namespace OpcDaToUaGateway
             {
                 // H-21 修复：传入配置的服务器主机名，支持远程 DA 服务器标签浏览
                 string daHost = Config.OpcDa?.ServerHost;
-                using (var dialog = new ItemSelectionDialog(progId, _log.Append, Config.OpcUa.NamespaceIndex, daHost ?? "localhost"))
+                // 高频浏览诊断（分支摘要/进度/数据类型批次）只落文件日志（_log.AppendFileOnly），
+                // 不进 UI 运行日志，避免大规模服务器浏览时 UI 线程被日志封送占满而「未响应」。
+                using (var dialog = new ItemSelectionDialog(progId, _log.Append, Config.OpcUa.NamespaceIndex, daHost ?? "localhost", _log.AppendFileOnly))
                 {
                     _btnFetchTags.Enabled = true;
 
@@ -602,7 +607,7 @@ namespace OpcDaToUaGateway
 
                 private void SetUiRunningState(bool isRunning)
         {
-            _btnStart.Enabled = !isRunning;
+            _btnStart.Enabled = !isRunning && !_licenseLocked;
             _btnBrowse.Enabled = !isRunning;
             _btnFetchTags.Enabled = !isRunning;
             _btnExportTags.Enabled = true;
@@ -823,14 +828,33 @@ namespace OpcDaToUaGateway
 
             // 初始化授权管理器
             _licenseMgr = new LicenseManager(_log, _configMgr, () => { });
+
+            // 试用到期且未授权 → 锁定「启动网关」；授权成功后自动解锁。其它功能（浏览/获取点位/关于）保持可用。
+            _licenseLocked = _licenseMgr.IsTrialExpired;
+
             _licenseMgr.StatusChanged += (text, color) =>
             {
-                SafeInvoke(() => { _lblLicenseStatus.Text = text; _lblLicenseStatus.ForeColor = color; });
+                SafeInvoke(() =>
+                {
+                    _lblLicenseStatus.Text = text;
+                    _lblLicenseStatus.ForeColor = color;
+
+                    // 授权成功后解除「启动网关」限制，恢复正常使用
+                    if (_licenseMgr.IsLicensed && _licenseLocked)
+                    {
+                        _licenseLocked = false;
+                        _log.Append("[授权] 授权成功，已解除「启动网关」限制");
+                        ApplyLicenseLock();
+                    }
+                });
             };
-            Func<Task> handleTrialExpiredAsync = async () =>
+
+            // 运行中试用到期：停止网关，关闭主程序与看门狗进程（用户可重新打开软件，届时「启动网关」不可用，
+            // 在「关于」中输入授权码即可恢复）。
+            Func<Task> handleTrialExpiredDuringRunAsync = async () =>
             {
-                // 试用到期，停止网关 (在 UI 线程上执行)
-                _log.Append("[授权] 正在停止网关...");
+                _log.Append("[授权] 试用到期，正在停止网关并关闭程序...");
+                _licenseLocked = true;
                 _btnStop.Enabled = false;
                 try
                 {
@@ -842,16 +866,16 @@ namespace OpcDaToUaGateway
                     _log.Append($"[授权] 停止网关失败: {ex.Message}");
                 }
 
-                _btnStart.Enabled = false;
-                _btnBrowse.Enabled = false;
-                _btnFetchTags.Enabled = false;
-
+                ApplyLicenseLock();
 
                 MessageBox.Show(
-                    "软件试用期（30 分钟）已到，网关已自动停止。\n\n" +
-                    "请获取授权码后在\"关于\"窗口中输入以继续使用。\n" +
-                    "关闭此提示后程序将退出。",
+                    "软件试用期（30 分钟）已到，网关与看门狗已停止，程序将退出。\n\n" +
+                    "可重新打开本软件，在\"关于\"窗口中输入授权码以恢复使用。",
                     "试用到期", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+                // 关闭看门狗进程（不再守护/重启），再退出主程序
+                try { _watchdogMgr?.Stop(); }
+                catch (Exception ex) { _log.Append($"[授权] 停止看门狗失败: {ex.Message}"); }
 
                 _forceClose = true;
                 _notifyIcon.Visible = false;
@@ -859,12 +883,48 @@ namespace OpcDaToUaGateway
             };
             // H-02 修复：async void 委托在 GatewayStopRequested 事件中若抛出异常，
             // 异常将在 async void 边界变为未观察异常，直接触发 UnhandledExceptionHandler 崩溃进程。
-            // 改为普通 lambda 捕获 Task，在 handleTrialExpiredAsync 内部做完整异常处理。
-            _licenseMgr.GatewayStopRequested += () => { _ = handleTrialExpiredAsync(); };
-            if (_licenseMgr.IsTrialExpired)
-                _ = handleTrialExpiredAsync();
+            // 改为普通 lambda 捕获 Task，在 handleTrialExpiredDuringRunAsync 内部做完整异常处理。
+            _licenseMgr.GatewayStopRequested += () => { _ = handleTrialExpiredDuringRunAsync(); };
+
+            ApplyLicenseLock();
+
+            if (_licenseLocked)
+            {
+                // 启动即已到期：不再退出程序，仅禁用「启动网关」，提示用户去「关于」授权。
+                _log.Append("[授权] 试用期已到：已禁用「启动网关」，可在\"关于\"中输入授权码以恢复使用");
+                ShowTrialExpiredNoticeOnce();
+            }
             else
+            {
                 ScheduleAutoStartIfNeeded();
+            }
+        }
+
+        /// <summary>
+        /// 按授权锁与运行状态刷新「启动网关」可用性（仅 UI 线程调用）。
+        /// 试用到期且未授权时为禁用，授权后恢复。
+        /// </summary>
+        private void ApplyLicenseLock()
+        {
+            bool running = _gatewayMgr?.IsRunning == true;
+            _btnStart.Enabled = !running && !_licenseLocked;
+        }
+
+        /// <summary>
+        /// 启动即已到期时，等窗口首次显示后再弹一次提示（不在构造函数中弹，避免窗口句柄尚未创建）。
+        /// </summary>
+        private void ShowTrialExpiredNoticeOnce()
+        {
+            EventHandler notice = null;
+            notice = (s, e) =>
+            {
+                Shown -= notice;
+                MessageBox.Show(
+                    "软件试用期（30 分钟）已到，「启动网关」已禁用。\n\n" +
+                    "请在\"关于\"窗口中输入授权码以恢复使用。",
+                    "试用到期", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+            Shown += notice;
         }
 
         // ================================================================
@@ -933,7 +993,12 @@ namespace OpcDaToUaGateway
                 // M1 修复：启动异常已由 GatewayManager 回滚资源并设置 Error 状态，
                 // 此处需要提示用户调用 ClearErrorState() 后才能重试。
                 _log.Append($"启动失败: {ex.Message}");
-                MessageBox.Show($"启动失败:\n\n{ex.Message}\n\n请检查日志后点击\"清除错误状态\"按钮重试。", "错误",
+                // 保留原始异常，端口类问题附加中文诊断，便于直接照着处理
+                string portHint = PortBindDiagnostic.Describe(ex, Config.OpcUa.Port);
+                string detail = string.IsNullOrEmpty(portHint)
+                    ? "请检查日志后点击\"清除错误状态\"按钮重试。"
+                    : portHint + "\n\n请检查日志后点击\"清除错误状态\"按钮重试。";
+                MessageBox.Show($"启动失败:\n\n{ex.Message}\n\n{detail}", "错误",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 _refreshTimer?.Stop();
             }
@@ -1071,7 +1136,11 @@ namespace OpcDaToUaGateway
                         else if (e.ColumnIndex == 3)
                             e.Value = s.Quality;
                         else
-                            e.Value = s.Timestamp.ToString("HH:mm:ss");
+                            // TagSnapshot.Timestamp 存的是 UTC（DataBridge.OnDaDataChanged 取 DateTime.UtcNow，
+                            // 同一值也传给 UA 作为 SourceTimestamp，以满足 UA 对 UTC 的规范）。
+                            // 显示层必须转本地时间，否则 UTC+8 用户看到的时间比墙钟慢 8 小时。
+                            // 注：c2a15cb 重写虚拟模式表格时误删了此处的 ToLocalTime()，V1.7.0 的修复被回退。
+                            e.Value = s.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff");
                     }
                     else
                     {

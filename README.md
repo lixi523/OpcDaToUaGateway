@@ -2,7 +2,7 @@
 
 ![Build](https://github.com/lixi523/OpcDaToUaGateway/actions/workflows/build.yml/badge.svg)
 
-> 版本：**V2.7.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
+> 版本：**V2.8.0** ｜ 协议转换网关：将 OPC DA 数据源实时映射为 OPC UA 服务器，供上位 SCADA/MES/工业平台订阅。
 
 ---
 
@@ -102,6 +102,7 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 | 版本 | 日期 | 变更摘要 |
 | --- | --- | --- |
+| **V2.8.0** | 2026-11-03 | **DA 标签浏览性能与兼容性修复 + 试用到期行为修正 + 版本升级**：① 修复大规模服务器（>1 万点位）浏览时点位浏览窗口「未响应」——浏览诊断日志分流，高频诊断（分支摘要/进度/数据类型批次）只落文件、不再逐条封送 UI，消除 `LogManager.UpdateTextBox` 的 O(n²) 卡顿；② 浏览改为**边扫描边显示**（每 1000 点位增量投递到列表）；③ 浏览兼容性增强——下钻不再依赖 `OPC_BROWSE_HASCHILDREN` 标志、新增根层友好的 `RootSafeBrowser2`（跳过部分服务器对 `ChangeBrowsePosition(OPC_BROWSE_TO,"")` 报 E_FAIL 的问题）、0 点位时依次回退 DA2/DA1 浏览器并最终用 `OPC_FLAT` 全量枚举；④ 数据类型填充只探测类型未知的点位；⑤ 新增浏览分阶段耗时与根层统计诊断；⑥ 试用到期行为修正——到期仅关闭主程序与看门狗进程、可重新打开，重新打开后未授权时禁用「启动网关」、授权成功后自动恢复；⑦ **UA 地址空间可见性修复**——分支变量统一分组到 `Batch_NNN`（`Batch_000` 装 1..1000），避免「单个文件夹直接子节点过多（数万）导致 UA 客户端 Browse 不到」；⑧ 三个 csproj 版本号统一升至 2.8.0。Debug/Release 0 警告 0 错误，100/100 测试通过。 |
 | **V2.7.0** | 2026-09-17 | **V2.6.0 代码审查修复收尾 + 版本升级**：① H1 质量位修复，`OpcDaClient` 改用 `OpcDaQualityMaster` 数据质量位判定 Good/Bad，避免 BAD 质量被误标为 Good；② H2 DI 注入修复，`GatewayManager` 不再用 `as` 具体类型转型破坏接口注入；③ H3 看门狗心跳事件重启后周期性重试 `OpenExisting`，避免守护进程先启动时心跳检测永久失效；④ H4/M3 日志错配修复，`WatchdogManager` 收窄异常并修正日志文案；⑤ H5/L1/L2 `DataBridge` 订阅先 `-=` 再 `+=`，空标签 `StartAsync` 行为与 `Start` 统一；⑥ M1 常量清理，恢复 `AppConstants` 中相关常量为唯一来源并替换硬编码；⑦ M2/M4/M5/M6/L3-L7 完成节点上限诊断日志、UI 实时列、授权说明、版本单一来源等修复。UI 修复：OPC DA 浏览窗口虚拟列表复选框鼠标点击勾选/取消不生效（`ItemCheck` 后刷新已显示行）；主界面“关于...”按钮文本还原。文档：开发指南等移入 `docs/`，新增 V2.6.0 审查报告，移除根目录旧文档。Debug 0 警告 0 错误，67/67 测试通过。 |
 | **V2.6.0** | 2026-09-15 | **代码审查报告 P0/P1 修复 + Keygen 目录仓库移除 + 版本升级**：① DataBridge 订阅幂等（Start/StartAsync 前先 -=）与 StartAsync null 安全取值；② OpcDaClient 批量重建字典 O(n²)→锁外预构建+锁内原子替换引用，readonly 字段改可赋值；③ OnValuesChanged 批次内异常限流（仅首条+计数）；④ Cleanup 超时分支由永不超时的 int.MaxValue 改为有界 30s 并直接释放 COM 资源，不再排队挂起工作项；⑤ Program 异常处理器空 catch 改为记录 Debug 二次异常；⑥ LogManager 空 catch 注释修正；⑦ DataBridge _cachedTypes 改 ConcurrentDictionary；⑧ Keygen/ 源码目录从仓库移除（本地保留，.gitignore 防止重新纳入），同步更新 csproj/sln/文档。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
 | **V2.5.0** | 2026-08-06 | **代码审查修复（第二轮）**：修复 GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）；EffectiveMaxReconnectAttempts 快照消除热更新TOCTOU；HealthSnapshot.RotateOldSnapshots 移到锁外；ConfigManager 临时文件改用GUID随机名；Program.cs 异常处理器前移到Bootstrap初始化之前并防护MessageBox二次异常；AutoStartManager WScript.Shell null 友好错误；测试修复：5处同步方法误用ThrowsAnyAsync改为ThrowsAny、DeriveKey断言优化、Task.Delay时序测试改用ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。 |
@@ -151,4 +152,4 @@ msbuild OpcDaToUaGateway.sln /p:Configuration=Release /t:Rebuild
 
 ---
 
-*本文档基于 V2.7.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*
+*本文档基于 V2.8.0 源码整理。如遇文档与软件实际行为不符，以软件界面为准。*

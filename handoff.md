@@ -1,317 +1,147 @@
 # Handoff - OPC DA to UA Gateway (OpcDaToUaGateway) 项目交接文档
 
-> **生成时间：** 2026-09-17
-> **当前版本：** V2.7.0
-> **编译状态：** 0 警告 / 0 错误 ✅（Debug）
+> **生成时间：** 2026-11-03
+> **当前版本：** V2.8.0（主程序 / Watchdog / Keygen 三个 csproj 统一 2.8.0）
+> **编译状态：** 0 警告 / 0 错误 ✅（Debug + Release）
+> **测试状态：** 100/100 通过 ✅（原有 78 + 本次新增 22）
 > **项目目录：** `D:\Documents\Code\OpcDa2Ua`
+> **技术栈：** .NET Framework 4.7.2（**x86**）、WinForms、Costura.Fody 单 exe 打包；DA 客户端 `TitaniumAS.Opc.Client` 1.0.2，UA 服务端 `OPCFoundation.NetStandard.Opc.Ua.Server` 1.5.378.145
+>
+> ⚠️ **本文档取代了 V1.8.0–V2.7.0 的历史版 handoff.md**。旧版可从 git 恢复：`git show HEAD:handoff.md`。
 
 ---
 
 ## 1. 项目目标
 
-`OpcDaToUaGateway` 是一个面向工业现场部署的协议转换网关：
+`OpcDaToUaGateway` 是面向工业现场部署的 OPC DA → OPC UA 协议转换网关：
 
 - **核心功能**：实时读取 OPC DA 标签，映射为 OPC UA 节点，供数据采集系统通过 UA 获取
 - **质量要求**：7×24 小时稳定运行，0 天不宕机
-- **技术栈**：.NET Framework 4.7.2（x86）、WinForms、SDK 风格 `.csproj`，使用 `TitaniumAS.Opc.Client` 1.0.2 作 DA 客户端，服务端基于 `OPCFoundation.NetStandard.Opc.Ua.Server` 1.5.378.145
-- **关键约束**：面向工业现场部署，UI 修改 = 现场修改，任何 UI 线程阻塞都会造成生产事故
+- **关键约束**：面向工业现场部署，**UI 修改 = 现场修改**，任何 UI 线程阻塞都会造成生产事故
 
 ---
 
 ## 2. 当前进度
 
-| 维度 | 状态 |
-| --- | --- |
-| ponytail 代码清理（8 项） | ✅ 完成 |
-| 代码审查修复（第三轮 V2.6.0 报告） | ✅ V2.7.0 完成：H1 质量位、H2 DI、H3 看门狗心跳重试、H4/M3 日志、H5 订阅幂等、M1 常量、M2/M4 UI、L1-L7 收尾 |
-| UI 复选框/按钮文本修复 | ✅ V2.7.0 完成：OPC DA 浏览窗口复选框鼠标点击勾选/取消生效；主界面按钮文本还原为“关于...” |
-| 版本号升级 | ✅ V2.7.0（两个 `.csproj` 同步，AppConstants 注释指向 OpcDaClient.AppVersion 单一来源） |
-| 移除旧客户端列表功能 | ✅ 已移除 |
-| 启动延迟、未响应问题修复 | ✅ V1.8.1 完成，节点创建走后台线程 |
-| DA 标签真实数据类型获取 | ✅ V2.0.0 完成（临时 Group + CanonicalDataType） |
-| String 类型标签显示修复 | ✅ V2.2.0 完成，移除 `!= "String"` 排除逻辑 |
-| CSV 导出格式统一为 6 列 | ✅ V2.2.0 完成，含 UA 完整路径 |
-| 按钮导航移除 | ✅ V2.2.0 完成 |
-| 图标更新 | ✅ V2.2.0 完成，统一为 `opc-da-opc-ua.ico` |
-| 接口抽象与单元测试 | ✅ V2.2.0 完成，56/56 测试通过 |
-| 安全增强 | ✅ V2.3.0 完成：授权码 AES 加密、OnValuesChanged 防护、ConvertValue 日志 |
-| 代码质量优化 | ✅ V2.3.0 完成：锁策略拆分、定时器泄漏修复、SafeInvoke 死锁修复、FormClosing 简化 |
-| 架构优化 | ✅ V2.3.0 完成：AutoStartManager 分离、BuildUI 拆分为 9 子方法、常量统一 |
-| 稳定性增强 | ✅ V2.4.0 完成：DPAPI 试用累计时间、单一自动启动 Timer、Sync 重连保持、同步 Read 生命周期保护 |
-| 代码审查修复（第一轮） | ✅ V2.4.0 完成：19 项 HIGH/MEDIUM 问题（DI 快照、async void、TrialStateStore CurrentUser 等） |
-| 代码审查修复（第二轮） | ✅ V2.5.0 完成：覆盖依赖注入、并发竞态、健康监控、异常处理等多类 HIGH/MEDIUM 问题（见 3.11 节） |
-| 发布包隔离 | ✅ V2.5.0 完成：CI 白名单打包，Keygen/Watchdog 不进入客户 Release 包与 Artifact |
-| 编译验证 | ✅ 0 警告 / 0 错误（Debug + Release） |
-| 单元测试 | ✅ 67/67 通过 |
+本会话（2026-11-03）处理了 5 个用户提出的问题 + 1 次升版，**全部已实现、编译 Debug/Release 0 警告 0 错误、测试 100/100，均未提交 git**。
+
+| # | 问题 | 性质 | 状态 |
+| --- | --- | --- | --- |
+| 1 | 大规模（>1 万点位）扫描 DA 标签时，点位浏览窗口「未响应」 | 真实 Bug（UI 日志洪泛） | ✅ 已修复 |
+| 2 | 标签扫描太慢 / 长时间看不到点位（>1 万） | 体验 + 性能 | ✅ 边扫描边显示 + 去冗探测 |
+| 3 | `pSpace.OPCServer` 扫描到 0 个点位（服务器实有 3.5 万标签） | 真实 Bug（浏览策略/接口不兼容） | ✅ 已加多级兜底，**待现场复核** |
+| 4 | OPC UA 客户端扫不到 UA 标签（UaExpert 只见 ns=0 节点） | 真实 Bug（UA 单文件夹子节点过多） | ✅ 已改为分支统一分组 `Batch_NNN` |
+| 5 | 试用 30 分钟到期后「打不开软件」，无法进「关于」授权 | 真实 Bug（到期直接退出 + 授权后未恢复按钮） | ✅ 已修复 |
+| 6 | 版本升级 | 升版 | ✅ 三个 csproj → V2.8.0，README/STATUS/故障恢复预案/handoff 同步 |
 
 ---
 
 ## 3. 已完成修改
 
-### 3.1 启动性能修复（V1.8.0 → V1.8.1，2026-07-16/17）
+### 3.1 大规模 DA 标签浏览「未响应」（`ItemSelectionDialog.cs` + `Services/LogManager.cs`）
 
-**问题**：`GatewayNodeManager.AddVariableNode` 每次创建新 UA 节点时，调用 `Diag()` → `OnStatusChanged` → `_log.Append` → `BeginInvoke(UpdateTextBox)` 将日志消息投递到 UI 线程。`LogManager.UpdateTextBox` 每次 `AppendText` + 截断 `Substring` 是 O(n)。3.5 万节点累计 **O(n²)**，耗时约 7 分钟。
+**现象**：点位浏览对话框（点「获取点位」后）在整个浏览期间显示「未响应」。
+
+**根因**：`ItemSelectionDialog.BeginBrowse` 的浏览回调把**每一条**诊断消息经 UI 线程封送两次——
+`_logger?.Invoke(...)`（=`MainForm._log.Append` → `LogManager.UpdateTextBox`，每次 `AppendText` 为 O(文本长度)、累计 O(n²)）+ `SafeBeginInvoke(...)`。
+大规模服务器浏览会输出**每个分支一条摘要 + 每 2000 点位进度 + 每 500 点位数据类型批次**，累计数千至上万条，把 UI 线程占满。与项目历史根因（V1.7.0 已连接客户端列表、V1.8.0 逐节点 `Diag`）同型（见 `docs/OPC_DA转UA网关开发指南.md` L353）。
+
 **修复**：
+- `LogManager` 新增 `AppendFileOnly(string)`：**仅写文件日志、完全不触碰 UI 文本框**；抽出 `EnqueueFileLine` 复用队列写入与队列满告警（补 `ObjectDisposedException` 捕获，注意其派生自 `InvalidOperationException`，catch 顺序须在前）。
+- `ItemSelectionDialog` 新增 `internal static class BrowseLogRouter`：
+  - `IsUiMilestone`（进 UI 日志）= 命中「尝试连接 OPC DA 服务器 / 连接成功 / 浏览阶段完成 / 连接失败 / 已达最大点位上限」或以 `[DCOM]` 开头；
+  - `IsLabelMilestone`（同步状态栏）= 上述阶段关键字（不含 `[DCOM]`）；
+  - 其余高频诊断 → 只走 `_fileOnlyLogger`（= `_log.AppendFileOnly`），**不做 UI 封送**。
+- 主构造函数新增可选参数 `Action<string> fileOnlyLogger`；`MainForm.BtnFetchTags_Click` 传入 `_log.AppendFileOnly`。
 
-- V1.8.0：移除 `AddVariableNode` 中节点 `Diag()` 调用，节点创建改为 O(1) `AddPredefinedNode`
-- V1.8.1：`DataBridge.StartAsync(Action<string>)` 使用 `Task.Run` 将 3.5 万 `AddVariableNode` 循环在后台线程执行，通过 `progressReport` 回调报告进度，每 ~5% 一次
+**结果**：浏览期间 UI 只剩约 5 次日志 + 阶段状态栏更新，对话框保持响应；文件日志仍保留全部分支摘要，离线排查能力不变。
 
-### 3.2 ponytail-review 代码清理（V1.9.0，2026-07-20）
+### 3.2 DA 标签浏览性能与「边扫描边显示」（`OpcDaClient.cs` + `ItemSelectionDialog.cs`）
 
-| 项目 | 内容 |
-| --- | --- |
-| R1 删除 GateController | 删除 `Services/GateController.cs`（150 行），事件透传模式替代 |
-| R2 删除 GatewayFactory | 删除 `GatewayFactory.cs`（56 行），StartAsync 改用直接 `new` |
-| R3 SafeInvoke 统一 | MainForm 新增 `SafeInvoke(Action)` 通用方法替换 4 处重复模式 |
-| R4 DataBridge 简化 | 删除 `_cachedDisplayName` 字典、`TagSnapshot.Equals/GetHashCode` |
-| R5 LogManager 清理 | 删除注释块、手动注释、空 catch |
-| R6 HealthSnapshot 重构 | 新增 4 个私有分析函数 |
-| R7 DEBUG 条件编译 | `Diag()` 添加 `[Conditional("DEBUG")]`，Release 自动消除 |
-| **合计** | **减少约 -485 行** |
+**根因（经 `ilspycmd` 反编译 TitaniumAS 1.0.2 确认）**：
+- `OpcDaBrowserAuto` 优先用 `OpcDaBrowser3`（`IOPCBrowse`），`GetElements` 内部按 `OpcConfiguration.BatchSize = 1024` **分页**，逐层遍历（每个分支一次 COM 往返）；
+- **默认 `GetElements` 不取元素属性**（`allProperties=false`）→ `ExtractDataType` 恒返回 `Variant` → `FillRealDataTypes` 必须对**全部**点位再走一遍临时 Group 的 `AddItems`（N/500 次 COM 往返）；
+- 对话框**只有等「浏览 + 数据类型填充」全结束才显示点位**，故大点位量时长时间空列表。
 
-### 3.3 全面 P0/P1 修复（V2.0.0，2026-07-21）
-
-**P0 Bug 修复**：
-
-- `HealthSnapshot.Capture()` Monitor 死锁：`TryEnter` 失败时 return，finally 中不会 `Exit` 导致 `SynchronizationLockException`
-
-**P1 建议实施**：
-
-- `GatewayManager.StartAsync` catch 块：`await uaServer.StopAsync()` 改为 `ConfigureAwait(false).GetAwaiter().GetResult()` 防止 SynchronizationContext 死锁
-- `GatewayManager.StopAsync`：双重 `_disposedInt` 检查，防止双释放
-- `ConfigManager`：FileSystemWatcher debounce Timer 泄漏修复（`Interlocked.Exchange` 原子替换时 Timer Dispose）
-- `FillRealDataTypes`：显式写入 UpdateRate 字段
-- `OpcDaClient.TryReconnect`：增加 `_disposedInt` 前置检查
-- `HealthSnapshot`：异常 catch 改为 `Debug.WriteLine` 输出
-- `Watchdog`：最小化启动参数改为 `--minimized`
-
-### 3.4 String 类型标签显示修复（V2.2.0，2026-07-23）
-
-**问题**：部分 OPC DA 标签类型为 String 时显示为 "Variant"
-**修复**：移除 `OpcDaClient.cs` 中 `ExtractDataType` 和 `FillRealDataTypes` 内的 `&& typeName != "String"` 排除逻辑
-
-### 3.5 CSV 导出格式统一（V2.2.0，2026-07-23）
-
-**问题**：导出/导入时，`CsvTagExporter` 和 `ItemSelectionDialog` 格式不统一，缺少 UA 完整路径
 **修复**：
+- `BrowseAllItems` 新增可选回调 `Action<IReadOnlyList<OpcDaItemInfo>> onItemsDiscovered`；`BrowseRecursive` 新增 `streamProgress`，**每积累 `AppConstants.DaBrowseStreamChunk = 1000` 个点位就把增量投递一次**（只投增量、不重复；`GetRange` 返回同一批对象引用，后续类型填充会就地更新）。
+- `ItemSelectionDialog` 接线增量回调，`AppendDiscoveredItems` 边扫描边把点位追加到列表（虚拟模式更新 `VirtualListSize` + `Invalidate`），状态栏显示「正在浏览… 已发现 N 个点位」；`OnBrowseComplete` 仍以完整结果重刷（类型已填充）。
+- `FillRealDataTypes` **只探测「类型仍未知」的点位**；全部已知时直接跳过临时 Group。
+- 新增**分阶段耗时日志**（浏览阶段 / 数据类型填充阶段，单位 ms）与**根层统计**（`[Browse] 根层统计: 共 N 元素, X 叶子, Y 分支, Z 其他`）。
 
-- 统一为 6 列格式：`名称, ItemId, 数据类型, 值, 质量, UA完整路径`
-- `CsvTagExporter.cs`：新增 6 列"UA完整路径"，值为 `ns={NamespaceIndex};s={Path}` 格式
-- `ItemSelectionDialog.cs`：导出/导入逻辑统一为 6 列格式
-- `MainForm.cs`：导入时解析 `NamespaceIndex` 写入 CsvTagExporter
-- 兼容旧格式（检测头部行数自动转换）
-- 移除 MainForm 上的"导出CSV"按钮
+### 3.3 `pSpace.OPCServer` 扫描到 0 点位（`OpcDaClient.cs`）
 
-### 3.6 图标更新（V2.2.0，2026-07-23）
+**证据**：日志显示连接成功、浏览**正常返回 0 元素且不抛异常**；诊断弹窗显示 `OpcDaBrowser2 失败: HRESULT E_FAIL`、`OpcDaBrowser1 根层 1 个元素`；其它 OPC 客户端能扫到标签（结构为 `模拟站.tag1 … 模拟站.tag35000`）。
 
-- 主项目 `.csproj`：`ApplicationIcon` 从 `app.ico` 改为 `opc-da-opc-ua.ico`
-- Keygen 子项目：`ApplicationIcon` 改为 `..\opc-da-opc-ua.ico`
-- Watchdog 子项目：`ApplicationIcon` 改为 `..\opc-da-opc-ua.ico`
-- MainForm 窗口图标：`app.ico` 资源文件名仍为 app.ico，不影响
+**根因**（反编译确认）：
+- `TitaniumAS` 的 `OpcBrowse.Browse` 内部 `do { try{...} catch(Exception){break;} } while(...)` —— **会吞掉 COM 异常并返回空数组**；于是 `OpcDaBrowser3` 返回「空但无异常」，`OpcDaBrowserAuto` 只在**抛异常**时才回退 → 不回退。
+- FLAT 命名空间服务器需要 DA2 的 `BrowseOPCItemIDs(OPC_FLAT)` 才能列出点位（OPC Foundation issue #878）；部分服务器对 `ChangeBrowsePosition(OPC_BROWSE_TO,"")` 返回 E_FAIL。
 
-### 3.7 版本号升级（V2.2.0，2026-07-24）
+**修复（多层兜底）**：
+1. 主策略拿到 **0 点位** 时，显式回退 `RootSafeBrowser2` → `OpcDaBrowser2` → `OpcDaBrowser1` 重试，并记录各策略根层元素数。
+2. 新增 `private sealed class RootSafeBrowser2 : OpcDaBrowser2`——空 `itemId` 时**跳过 `ChangeBrowsePosition`**（根层本就在根位置）。
+3. 放宽下钻条件：`IsItem==false` 的元素**一律尝试下钻**（不再依赖 `OPC_BROWSE_HASCHILDREN` 标志；`ItemId` 非空 + 深度 ≤ `MaxBrowseDepth=10` 保护）。部分服务器不设置该标志，旧逻辑会漏掉整棵子树。
+4. 终极端兜底：仍为 0 时改用 `server.As<OpcBrowseServerAddressSpace>().BrowseOpcItemIds(OpcDaBrowseType.Flat, …)` **一次性全量枚举**（`GetItemId(name)` 取 ItemId，失败回退用名称）。
 
-所有 `.csproj`、`AppConstants.AppVersion`、README.md、STATUS.md、handoff.md、使用文档.md 同步更新
+### 3.4 OPC UA 客户端扫不到 UA 标签（`GatewayOpcUaServer.cs`）
 
-### 3.8 接口抽象与单元测试（V2.2.0，2026-07-24）
+**证据**：网关启动日志 `命名空间索引: 2, 实际变量数: 35000`（节点都建了），但 UaExpert 只见标准 ns=0 节点；3.5 万变量的 `ItemId` 均为 `模拟站.tagN` → **全部直接挂在同一个 UA 文件夹 `DaTags/模拟站` 下**。
 
-**目标**：为扩展性、可测试性、可替换性奠定基础
-**变更记录**：
+**根因**：项目 H-24-1 记录「单文件夹直接子节点过多（35000+）会触发 SDK 的 Browse 不可见边界条件」，当时只对**无分支(Flat)** 场景做了分批（`FlatTags/Batch_NNN`），**漏了「一个大分支下挂几万变量」**。
 
-- `IGatewayOpcUaServer.cs`：新增 `UpdateValue(string tagKey, object value, bool isGood, DateTime sourceTimestamp)` 方法签名
-- `DataBridge.cs`：`_daClient` 和 `_uaServer` 字段从具体类型改为接口（`IOpcDaClient` / `IGatewayOpcUaServer`），构造函数接受接口参数
-- `GatewayManager.cs`：构造函数接受可选接口参数（默认 null），`StartAsync` 条件实例化（如 `uaServer == null` 则 new 具体类）
-- `FakeGatewayOpcUaServer.cs`：新建，实现 `IGatewayOpcUaServer` 完整 Mock 实现（内存存储变量、状态计数、故障注入标志 ThrowOnAddNode/ThrowOnUpdate）
-- `Tests/FakeGatewayOpcUaServerTests.cs`：新建，14 个 xUnit 测试，覆盖生命周期、节点创建、值更新、故障注入、释放安全
-- **测试结果**：Debug 0 警告 0 错误，Release 0 警告 0 错误，14/14 通过
+**修复**：
+- `GatewayNodeManager` 新增按分支路径计数的 `_branchChildCount`；`AddVariableNode` 中新增调用 `GetOrCreateBranchBatchFolder`。
+- **分支变量统一分组**到该分支的 `Batch_NNN` 子文件夹：`模拟站/Batch_000/tag1..tag1000`、`Batch_001/tag1001..tag2000`…（每批 `AppConstants.UaFlatBatchSize = 1000`）。分支文件夹本身**只保留 Batch 子文件夹**（不再有 1000 个直接子节点）。
+- 新增 `SafeIdPart(path)`（保留中英文数字，其余替换 `_`）生成 Batch 文件夹 NodeId：`Folder_{safePath}_B{idx:D3}`。
+- 新增诊断日志：`[诊断] 分支变量分组：模拟站 → Folder_模拟站_B000（Batch_000）`。
 
-### 3.9 安全增强与代码质量优化（V2.3.0，2026-07-26）
+> 注：用户明确要求「序号 1–1000 的标签也放在组里」，故**所有有分支的标签都会多一层 `Batch_NNN`**（小分支如 `b.c/Batch_000/d` 也一样）。
+> `ComputeUaBrowsePath`（导出用）**当前无任何调用者**，未同步 Batch 层级，无回归影响。
 
-**安全增强：**
+### 3.5 试用 30 分钟到期行为（`MainForm.cs`）
 
-- 授权码 AES-256-CBC 加密存储：`config.json` 中 `AuthorizationCode` 不再明文，密钥由 `LicenseAlgorithm.DeriveKey()` 派生，随机 IV 每次加密生成
-- `OpcDaClient.OnValuesChanged` 添加 `Volatile.Read(ref _disposedInt)` 检查，防止 Dispose 后回调崩溃
-- `DataBridge.ConvertValue` 空 catch 添加日志告警，数据类型转换失败不再静默
+**现象**：到期后「无法打开软件」，进不了「关于」输入授权码。
 
-**代码质量优化：**
+**根因**：`MainForm.LoadConfiguration` 里的 `handleTrialExpiredAsync` 在**运行中到期**与**启动时已到期**两种情况都直接 `Close()` 退出程序；且到期退出走 `SignalGracefulExit()`，**Watchdog 仍在运行**；授权成功后也没有把「启动网关」重新启用。
 
-- `ConfigManager` 锁策略拆分：`DoSave()` 拆分为 `DoSaveCore()`（无锁，由调用者持有）+ `DoSave()`（Timer 回调入口，获取锁后委托）
-- `WatchdogManager.Start` 异常时 `_heartbeatTimer?.Dispose()` 修复定时器泄漏
-- `LogManager.WriterLoop` 文件重建失败时降级写入 `Debug.WriteLine`，日志不再永久丢失
-- `MainForm.SafeInvoke` 改为 `BeginInvoke`，消除同步 Invoke 的潜在死锁
-- `OpcDaClient.TryReconnect` 重构：内联释放资源，避免调用 `Cleanup()` 导致的 `_disposedInt` 竞态
-- `MainForm.FormClosing` 四个标志位简化为两个
-- `HealthSnapshot.Capture` 在 Monitor 内添加 `Volatile.Read` 二次检查
+**修复（按用户要求）**：
+- 新增 `_licenseLocked`，`SetUiRunningState` 改为 `_btnStart.Enabled = !isRunning && !_licenseLocked;`（防止网关停止事件把按钮重新点亮）。
+- **启动即已到期**：程序**正常启动**，仅禁用「启动网关」，其它功能（浏览/获取点位/关于）保持可用；提示延迟到窗口 `Shown` 后弹一次（构造函数中无窗口句柄，不能用 `BeginInvoke`/弹窗）。
+- **运行中到期**：独立 `handleTrialExpiredDuringRunAsync` → 停止网关 → 提示 → `_watchdogMgr.Stop()` **关闭看门狗进程** → 退出主程序。之后用户可**重新打开**软件。
+- `StatusChanged` 处理器中：`IsLicensed && _licenseLocked` → 解锁并 `ApplyLicenseLock()` 恢复「启动网关」。
+- 保留 `BtnStart_Click` 里「到期则提示不可启动」的兜底判断。
 
-**架构优化：**
+### 3.6 版本升级 V2.8.0
 
-- `AutoStartManager` 从 `ConfigManager` 分离：新建 `Services/AutoStartManager.cs`，`ConfigManager` 缩减约 70 行
-- `MainForm.BuildUI` 从 597 行拆分为 9 个子方法
-- 修复 3 个 xUnit1031 警告（`Task.WaitAll` → `await Task.WhenAll`）
-- `HealthSnapshot` 缓存 Process 对象，避免每 5 分钟创建新实例
-- 硬编码字符串 `"localhost"`、`"Variant"` 统一为 `AppConstants.DefaultDaHost`、`AppConstants.UnknownDataType`
-- 去除冗余修复标记注释，保留描述性注释
-
-**验证结果：** Debug 0 警告 0 错误，Release 0 警告 0 错误，测试 56/56 通过
-
-### 3.10 稳定性增强与发布（V2.4.0，2026-08-01）
-
-**试用累计时间持久化：**
-
-- 新增 `Services/TrialStateStore.cs`，使用 Windows DPAPI `DataProtectionScope.LocalMachine` 将累计运行秒数写入 `%ProgramData%\OpcDaToUaGateway\trial.dat`
-- `LicenseManager` 改为按历史累计秒数加本次 Stopwatch 计算剩余时间；每分钟、到期、授权前和退出时保存
-- 首次启动时同步创建并验证状态文件，创建失败按到期处理；状态文件损坏时 fail-closed
-- 随机临时文件名避免高权限固定路径攻击
-- 时间保存失败立即标记试用到期并停止网关
-
-**单一自动启动流程：**
-
-- `SetupEventHandlersAndAutoStart()` 不再创建自动启动 Timer，仅初始化健康 Timer 和窗体事件
-- 配置、网关和授权管理器初始化完成后，由 `ScheduleAutoStartIfNeeded()` 调度一次 Timer
-- Tick 捕获并 Dispose 自己的 Timer 实例，直接在 UI 线程调用启动逻辑，不使用 `Task.Run`
-
-**Sync 重连保持模式：**
-
-- `OpcDaClient` 新增 `OpcDaClientLifecycleState` 内部类，记录当前采集模式
-- `TryReconnect()` 使用保存的模式调用 `Start(updateRateMs, savedMode)`，不再默认使用 Async
-
-**同步读取与 COM 释放竞态修复：**
-
-- 同步读取 `DoSyncRead()` 使用 `Interlocked` 门禁确保最多一个在途
-- 停止和清理时先停止 Timer，再有限等待在途读取结束；超时安排延迟释放，不留下永久丢失的 COM 对象
-- `Cleanup()` 超时不再提前标记 `_disposedInt`，重连异常恢复可重试标志位
-- 新增 `ReleaseComResources()` 提取公共 COM 资源释放逻辑
-
-**清理既有编译警告：**
-
-- 删除未使用的 `_gridTags` 字段和 `DgvTags_CellValueNeeded` 方法，消除 CS0649 警告
-- 当前 Debug/Release 均为 0 警告 0 错误
-
-**ConfigManager 保存失败反馈：**
-
-- `DoSaveCore()` 返回 `bool` 指示保存成功/失败
-- 新增 `TrySaveImmediate()` 供外部调用，`LicenseManager.ApplyAuthorizationCode` 使用此方法确认授权码持久化后才更新运行时状态
-
-**验证结果：** Debug 0 警告 0 错误，Release 0 警告 0 错误，测试 66/66 通过
-
-### 3.11 代码审查修复第二轮（V2.5.0，2026-08-06）
-
-**依赖注入与可测试性：**
-
-- `GatewayManager` 构造函数接受接口参数但未赋值字段，`StartAsync` 中局部变量恒 null 导致 DI 失效（H-01）；改为从字段读取初始值，注入非 null 时直接使用
-- `EffectiveMaxReconnectAttempts` 计算属性在 `CheckHealth` 中重复求值，配置热更新时产生 TOCTOU；快照为局部变量（M-02/H-09），同时修复重连计数器在退避检查前递增导致提前触发"达到最大重连次数"
-
-**并发与线程安全：**
-
-- `GatewayOpcUaServer.StartAsync` 非原子"检查-设置"，并发调用创建重复 Server 实例；改用 `Interlocked.CompareExchange` 启动标志（H-05），`StopAsync` 改 `Volatile.Read`（H-06），`Task.Run` 停止改 async lambda 修复 ValueTask 未 await（H-04）
-- `DataBridge` 使用 `_uaServer` 字段而非已快照的局部变量，`Stop` 置 null 后 NRE（H-15）
-- `LogManager.Dispose` 顺序竞态：先置 `_disposed` 再 `CompleteAdding`，消除 `TryAdd` 抛异常被吞的窗口（H-11）
-- `ConfigManager` 序列化异常后 `AuthorizationCode` 未恢复，有效授权被清除；finally 块补充恢复（H-16）；FileSystemWatcher 防抖 Timer 闭包局部变量写-写竞态，提升为实例字段 + `Interlocked.Exchange`（H-23）
-
-**健康监控失效：**
-
-- `HealthSnapshot.Capture()` 为私有且从未被调用，健康文件永远无数据；改为公共方法由 `MainForm` 健康 Timer 每 5 分钟触发（H-14），`IHealthSnapshot` 新增 `Capture()` 接口
-- 核心指标（DA 连接/更新计数/错误计数/变量数）全部保持零值未填充（H-13）；`_cachedProcess` 字段存在但从未赋值（M-13）
-- 快照文件 I/O 与 `RotateOldSnapshots` 移到锁外，避免持锁阻塞 `GenerateDailySummary`（M-05/M-14）
-
-**异常处理与功能正确性：**
-
-- `Program.cs` 全局异常处理器注册晚于 `Bootstrap.Initialize`，初始化异常无法记录到 crash.log；前移注册并 `try-catch` 包裹 `MessageBox.Show` 二次异常（H-04）
-- `MainForm` `GatewayStopRequested` 用 `async void` 委托，异常变为未观察异常直接崩溃进程；改普通 lambda 内部完整异常处理（H-02）
-- `MainForm.ScheduleAutoStartIfNeeded` 可空 `Tags?.Count <= 0` 在 Tags 为 null 时结果为 false，错误地继续调度（H-01）
-- `ItemSelectionDialog` 硬编码 "localhost" 不支持远程 DA 服务器浏览，改由构造函数传入 host（H-21）；虚拟模式 `_listView.Items.Count` 恒为 0 导致 OK 按钮永不启用（H-22）；遗留构造函数标 `[Obsolete]`（M-06）
-- `LicenseManager` PCID 生成异常被吞为 "UNKNOWN" 导致已授权用户被清回试用（H-18）；试用状态文件 Invalid（损坏/IO 抖动）误判为试用到期（H-19）
-- `AutoStartManager` 受限环境 `WScript.Shell` ProgID 返回 null 时友好报错（H-05）
-
-**健壮性与一致性：**
-
-- `ConfigManager` 固定 `.tmp` 后缀多进程并发保存互相覆盖，改 GUID 随机临时文件名（M-03）；`CsvTagExporter` 改"临时文件 + File.Replace"原子写入（M-25），BOM 检测由 `ReadAllBytes` 改为只读前 4 字节（M-26）
-- `TrialStateStore` DPAPI 作用域 `LocalMachine` → `CurrentUser`，收紧保护范围至当前用户
-- `LogManager` 移除显式 `NullReferenceException` catch 反模式（M-23）
-
-**测试修复：** 5 处同步方法误用 `ThrowsAnyAsync` 改为 `ThrowsAny`，`DeriveKey` 断言优化，`Task.Delay` 时序测试改用 `ManualResetEventSlim`
-
-**验证结果：** Debug 0 警告 0 错误，Release 0 警告 0 错误，测试 67/67 通过
-
----
-
-### 3.12 发布包隔离（V2.5.0，2026-09-15）——新增安全措施
-
-**安全背景**：Keygen 是内部授权码计算工具，若随客户发布包分发，客户可直接运行生成合法授权码，等同于破解商业授权体系。
-
-**实施措施**：
-
-- CI 流水线 `.github/workflows/build.yml` 改为白名单打包：Release 包中**明确排除 Keygen，保留 Watchdog**
-- 发布包内容对照：
-
-| 文件/目录 | 是否包含在客户发布包中 |
-| --- | --- |
-| `OpcDaToUaGateway.exe` | ✅ 包含（核心主程序） |
-| `OpcDaToUaGateway.Watchdog.exe` | ✅ 包含（守护进程，供需要崩溃自动重启的无人值守场景部署） |
-| `OpcDaToUaGateway.Keygen.exe` | ❌ **严禁包含**（随发布包分发等同于破解授权体系） |
-| `config.json` | ✅ 包含（配置文件） |
-| `logs/` | ✅ 包含（运行时日志） |
-
-**使用规范**：
-
-- Keygen 仅在开发/运维人员本地使用（`Keygen.exe <PCID>` 生成授权码）
-- 授权码由管理员生成后通过安全渠道（邮件/内部系统）提供给客户输入使用
-- 客户端仅输入授权码，**不可**自行生成
-- Watchdog 仅在需要崩溃自动重启的无人值守场景由运维单独部署，不随主包分发
-
----
-
-### 3.13 V2.6.0 代码审查修复（V2.7.0，2026-09-17）
-
-**修复范围：** 覆盖 `docs/代码审查报告_V2.6.0.md` 中 H1-H5、M1-M6、L1-L7 全部审查项。
-
-**核心修复：**
-
-- **H1 质量位**：`OpcDaClient.OnValuesChanged` 与 `DoSyncReadCore` 改为 `value.Quality.Master == OpcDaQualityMaster.Good`，避免 DA 侧 Bad/Uncertain/Error 质量被误标为 Good
-- **H2 DI 注入**：`GatewayManager.StartAsync` 不再用 `as` 具体类型转型，保持接口注入可替换 Fake 实现
-- **H3 看门狗**：`Watchdog/Program.cs` 对心跳事件增加周期性 `OpenExisting` 重试，解决主进程晚启动导致心跳检测永久失效
-- **H4/M3 日志**：`WatchdogManager.Stop()` 与相关 catch 文案收窄/修正，避免“启动看门狗失败”误导
-- **H5/L1/L2 订阅**：`DataBridge.Start/StartAsync` 统一先 `-=` 再 `+=`，空标签路径补统计日志，避免重复启动累积订阅
-- **M1 常量**：恢复 `AppConstants.WatchdogHeartbeatMs / DaMaxReconnectAttempts / DefaultSessionTimeoutMs / UaDefaultPort` 为唯一来源，替换硬编码
-- **M2/M4/L3-L7**：节点上限诊断日志、UI 虚拟模式实时列、注释与版本来源整理
-
-**UI 与文档附加修复：**
-
-- **OPC DA 浏览窗口复选框**：`ItemSelectionDialog` 虚拟模式下鼠标点击复选框勾选/取消不生效，`ItemCheck` 处理器更新数据后刷新已显示行（`Invalidate` + `Refresh`）
-- **主界面按钮文本**：`MainForm` 顶部按钮由“授权管理...”还原为“关于...”
-- **文档整理**：开发指南/使用文档/故障恢复预案/本地编译步骤移入 `docs/`，新增 `docs/代码审查报告_V2.6.0.md`，移除根目录旧文档
-
-**验证结果：** Debug 0 警告 0 错误，Release 0 警告 0 错误，67/67 测试通过；GitHub Release `v2.7.0` 已创建（tag 触发 CI）。
+- `OpcDaToUaGateway.csproj` / `Watchdog/OpcDaToUaGateway.Watchdog.csproj` / `Keygen/OpcDaToUaGateway.Keygen.csproj`：`Version` / `AssemblyVersion` / `FileVersion` → **2.8.0**（产物 `FileVersion=2.8.0.0`）。
+- `README.md`：顶部版本行、版本历史新增 V2.8.0 条目、页脚。
+- `docs/STATUS.md`：当前版本 V2.8.0 + 版本演进新增条目。
+- `docs/故障恢复预案.md`：证书自动重建的「自 v2.7.1 起」订正为「自 v2.8.0 起」。
 
 ---
 
 ## 4. 关键文件
 
-| 文件 | 状态 | 说明 |
+### 本次改动
+
+| 文件 | 改动 | 说明 |
 | --- | --- | --- |
-| `GatewayOpcUaServer.cs` | 已修改 | UA Server 封装，移除节点 Diag，节点创建改为 O(1) AddPredefinedNode |
-| `DataBridge.cs` | 已修改 | V1.8.1 StartAsync 后台线程创建节点；V2.2.0 接口化；V2.3.0 ConvertValue 空 catch 日志 |
-| `Services/CsvTagExporter.cs` | 已修改 | V2.2.0 6 列格式，含 UA 完整路径 |
-| `Services/GatewayManager.cs` | 已修改 | ConfigureAwait(false) 修复，StopAsync 双释放保护，接口注入 |
-| `Services/ConfigManager.cs` | 已修改 | V2.3.0 锁策略拆分，移除 auto-start 方法；V2.4.0 TrySaveImmediate |
-| `Services/HealthSnapshot.cs` | 已修改 | Monitor TryEnter 修复，V2.3.0 缓存 Process |
-| `OpcDaClient.cs` | 已修改 | FillRealDataTypes 移除 String 排除；V2.3.0 OnValuesChanged 防护 + TryReconnect 重构；V2.4.0 模式保持 + 读取门禁 + 安全清理 |
-| `MainForm.cs` | 已修改 | V2.3.0 BuildUI 拆分为 9 子方法；V2.4.0 单一自动启动 + 移除 `_gridTags` 警告 |
-| `ItemSelectionDialog.cs` | 已修改 | 导出/导入逻辑统一 6 列格式 |
-| `GatewayState.cs` | 已修改 | GatewayStateExtensions.ToDisplayName() 统一显示 |
-| `Models/TagConfig.cs` | 已修改 | OpcDaConfig 新增 MaxReconnectAttempts 参数 |
-| `AppConstants.cs` | 已修改 | V2.7.0 中移除硬编码 AppVersion，版本单一来源为 OpcDaClient.AppVersion；保留 DefaultDaHost / UnknownDataType 等常量 |
-| `Services/AutoStartManager.cs` | **新建** | V2.3.0 从 ConfigManager 分离的开机启动管理器 |
-| `Services/LicenseManager.cs` | 已修改 | V2.4.0 累计运行时间持久化 + 授权码保存失败回滚 + ExpireTrial 幂等 |
-| `Services/TrialStateStore.cs` | **新建** | V2.4.0 DPAPI 试用累计时间存储 |
-| `Services/Interfaces/*.cs` | 已修改/新建 | IOpcDaClient, IGatewayOpcUaServer, IDataBridge, IHealthSnapshot |
-| `Services/Interfaces/FakeGatewayOpcUaServer.cs` | 新建 | Mock 实现，用于单元测试 |
-| `Tests/FakeGatewayOpcUaServerTests.cs` | 新建 | 14 个 xUnit 测试 |
-| `Tests/LicenseAlgorithmTests.cs` | 新建 | 18 个 xUnit 测试 |
-| `Tests/DataBridgeTests.cs` | 新建 | 24 个 xUnit 测试 |
-| `Tests/TrialStateStoreTests.cs` | **新建** | V2.4.0 DPAPI 状态读写测试 |
-| `Tests/LicenseTrialClockTests.cs` | **新建** | V2.4.0 累计时间计算测试 |
-| `Tests/OpcDaClientLifecycleTests.cs` | **新建** | V2.4.0 模式保持 + 读取门禁测试 |
+| `OpcDaClient.cs` | 大量 | 浏览流式投递 + 放宽下钻 + `RootSafeBrowser2` + 多级兜底 + FLAT 枚举 + 类型探测去冗 + 阶段耗时/根层统计日志 |
+| `ItemSelectionDialog.cs` | 较多 | `BrowseLogRouter` 分流、`fileOnlyLogger`、边扫描边显示、0 点位时把浏览诊断附进提示弹窗 |
+| `Services/LogManager.cs` | + | `AppendFileOnly` + `EnqueueFileLine` |
+| `GatewayOpcUaServer.cs` | 中 | 分支变量统一分组 `Batch_NNN`（`GetOrCreateBranchBatchFolder` / `SafeIdPart` / `_branchChildCount`） |
+| `MainForm.cs` | 中 | 试用到期行为（`_licenseLocked` / `ApplyLicenseLock` / `ShowTrialExpiredNoticeOnce` / 运行中到期关闭看门狗） |
+| `AppConstants.cs` | +1 | 新增 `DaBrowseStreamChunk = 1000` |
+| `README.md` / `docs/STATUS.md` / `docs/故障恢复预案.md` | 文档 | 版本与变更同步 |
+| `Tests/BrowseLogRouterTests.cs` | **新建** | 22 个路由用例（高频诊断不得进 UI；里程碑进 UI/状态栏） |
+
+### 其他文件（本次未改，理解用）
+
+| 文件 | 说明 |
+| --- | --- |
+| `DataBridge.cs` | `OnDaDataChanged` 取 `DateTime.UtcNow` 同源传给 UA 与快照 —— **正确，勿改**；UA 变量创建走 `AddVariableNode` |
+| `Models/TagConfig.cs` | `OpcUaConfig`、`GetEffectiveListenAddress()`、`NamespaceUri` **必须非空**（否则 `GatewayNodeManager` 构造抛异常 → `BadInternalError 'Unexpected error starting application'`） |
+| `Services/WatchdogManager.cs` | `Stop()` = 完全终止看门狗进程；`SignalGracefulExit()` = 仅告知不重启（看门狗保持运行） |
 
 ---
 
@@ -319,42 +149,60 @@
 
 | 文件 / 模块 | 原因 |
 | --- | --- |
-| `GatewayOpcUaServer.cs` 内 `UpdateValue` / 订阅 / 节点管理核心 | UA Server 线程安全，修改风险极高 |
+| `GatewayOpcUaServer.cs` 内 `UpdateValue` / 订阅 / 节点管理核心 | UA Server 线程安全，修改风险极高（本次仅在**文件夹创建/分组**处改动） |
 | `OpcDaClient.cs` COM 连接/断开逻辑 | OPC DA COM 客户端，线程模型复杂，连接/超时/释放时序敏感 |
-| `ConfigManager.cs` 配置逻辑 | 配置管理优先级高，影响稳定性 |
-| `Services/WatchdogManager.cs` | 看门狗进程管理逻辑，通过事件通知 |
+| `ConfigManager.cs` 配置逻辑 | 影响稳定性 |
+| `Services/WatchdogManager.cs` | 看门狗进程管理 |
 | `Models/LicenseAlgorithm.cs` | 授权算法（PCID + HMAC），修改会导致历史授权失效 |
 | `Theme.cs` / `AppConstants.cs` | 全局样式常量 |
-| `Watchdog/` / `Keygen/` 目录 | 独立子项目，编译后自动复制到输出目录 |
+| `Watchdog/` / `Keygen/` 目录 | 独立子项目；Keygen 严禁进客户发布包（等同破解授权） |
 | `Services/Interfaces/IHealthSnapshot.cs` | 健康快照接口 |
+
+**本会话额外确立的约束**：
+
+- `TagSnapshot.Timestamp` 内存中**必须保持 UTC** —— UA `SourceTimestamp` 规范要求，本地化只允许在显示层
+- 项目 `PlatformTarget` 为 **x86**；外部工具/测试程序集编译须匹配平台，否则 `BadImageFormatException`
+- 主 exe 经 Costura 合并，**不能被直接引用**；需通过 Tests 项目引用
+- `LogManager.Append` 的 UI 更新是 O(文本长度)；**任何高频日志都必须走 `AppendFileOnly`**，否则会重演 UI「未响应」
 
 ---
 
-## 6. 已否掉的方案
+## 6. 已经否掉的方案
 
 | 方案 | 否决原因 |
 | --- | --- |
-| **保留 `AddPredefinedNode` 回退**（`_bulkLoading` + 旧支持） | 当前实现已确认 `AddPredefinedNode` 自带 O(1) 字典查找，无需回退机制 |
-| **保留 `GatewayFactory` 模式** | 仅默认实现，`StartAsync` 强制转回具体类型，完全可移除 |
-| **保留 `GateController` 中间层** | 5 个事件纯透传，无业务逻辑 |
-| **保留节点日志 `Diag`/`Log` 在 `AddVariableNode` 中** | 3.5 万节点 × 3.5 万次 BeginInvoke = O(n²)，已确认性能杀手 |
-| **保留 `TagSnapshot.Equals/GetHashCode`** | 全项目未使用 |
-| **保留旧式 CSV 格式** | 6 列格式已兼容旧格式转换 |
-| **试用期改用注册表 + 会话隔离** | 部署和权限处理更复杂，DPAPI 本机文件已满足需求 |
-| **试用状态完整防回滚设计** | 属于授权体系固有限制，本地累计方案无法彻底解决，详见审查报告 |
+| 浏览日志全部保留在 UI 运行日志（只减少输出频率） | 治标；分支摘要本身有价值，改走文件通道更彻底 |
+| 大规模浏览时对未标记 `HasChildren` 的分支“不”下钻 | 已在 3.3 反其道行之——实测部分服务器不设置该标志，必须下钻 |
+| 用 `RootSafeBrowser2` 替代主策略 `OpcDaBrowserAuto` | Browser3(`IOPCBrowse`) 对多数服务器更优；仅在主策略返回 0 时兜底使用 |
+| 把「有分支的大文件夹」首批并入 `Batch_000` 但保留小分支直挂 | 需在超阈值时迁移已建子节点，实现复杂、风险高；改为**统一分组**（用户已接受） |
+| 试用到期直接退出程序（原实现） | 导致无法重开、无法进「关于」授权；改为「只关闭进程 + 未授权禁用启动按钮」 |
 
 ---
 
 ## 7. 当前风险点
 
-| 风险 | 等级 | 说明 / 缓解 |
-| --- | --- | --- |
-| 未经验证的运行时 | 🟢 已缓解(V1.8.1) | 实际验证通过，3.5 万节点 UI 无卡顿 |
-| `[Conditional("DEBUG")]` 调试信息丢失 | 🟡 中（需感知） | Release 模式消除调试日志，排查问题时需临时切 Debug |
-| `Diag` 函数仍有 3 处调用节点 | 🟢 低（已加后缀） | 按需调用，注意性能 |
-| CSV 导出格式兼容性 | 🟢 低 | 新版本 6 列为默认，旧版 3/5 列格式已兼容转换 |
-| 试用状态文件删除可重置累计时间 | 🟡 中（设计取舍） | DPAPI 保护机密性，但无法防止删除；本地累计方案固有局限 |
-| 36 小时以上运行未测试 | 🟡 中 | 生命周期测试仅覆盖单次启动停止，未验证 7×24 稳定性 |
+### 🔴 待现场复核
+
+| 风险 | 说明 |
+| --- | --- |
+| **`pSpace.OPCServer` 兜底方案未在本机实测** | 本机无该服务器；`RootSafeBrowser2`/放宽下钻/`OPC_FLAT` 枚举三条兜底是否真正扫到 3.5 万点位，需用现场环境验证（诊断弹窗会打印各策略根层元素数与 FLAT 枚举数量） |
+| **UA 分支统一分组后的浏览结构变化** | 所有有分支标签都多一层 `Batch_NNN`；需确认现场 SCADA 的 NodeId/浏览路径配置随之调整（NodeId 仍是 `DaTag_{tagKey}`，未变） |
+
+### 🟡 设计权衡（已知，可接受）
+
+| 风险 | 说明 |
+| --- | --- |
+| 分支/扁平分批阈值均为 1000 | 单文件夹 ≤1000 子节点实测可被客户端 Browse；阈值过大有不可见风险，过小结构碎片化 |
+| `ComputeUaBrowsePath` 未同步 Batch 层级 | 当前无调用者；若将来启用导出 BrowsePath，需补 `Batch_NNN` |
+| `FillRealDataTypes` 仍对未知类型点位全量探测 | 默认浏览不带属性，故通常仍需探测；若后续改为浏览带属性可整段跳过 |
+
+### 🟡 历史遗留（本次未处理）
+
+| 风险 | 说明 |
+| --- | --- |
+| `ItemSelectionDialog` 右键会触发行勾选切换 | MouseDown/MouseUp 未检查 `e.Button`；右键点行会静默改变导入内容 |
+| 拖拽会切换错误的行 | `MouseUp` 沿用 `MouseDown` 的 ItemId，未重新命中行 |
+| 证书主题与监听地址耦合 / 自动重建可能销毁有效证书 | 见历史版 handoff（`git show HEAD:handoff.md`）§7；仍未拍板 |
 
 ---
 
@@ -364,48 +212,31 @@
 | --- | --- |
 | `dotnet build OpcDaToUaGateway.sln -c Debug` | 0 警告 / 0 错误 ✅ |
 | `dotnet build OpcDaToUaGateway.sln -c Release` | 0 警告 / 0 错误 ✅ |
-| xUnit 单元测试（LicenseAlgorithmTests） | 18/18 全部通过 ✅ |
-| xUnit 单元测试（DataBridgeTests） | 24/24 全部通过 ✅ |
-| xUnit 单元测试（FakeGatewayOpcUaServerTests） | 14/14 全部通过 ✅ |
-| xUnit 单元测试（TrialStateStoreTests） | 4/4 全部通过 ✅ |
-| xUnit 单元测试（LicenseTrialClockTests） | 3/3 全部通过 ✅ |
-| xUnit 单元测试（OpcDaClientLifecycleTests） | 4/4 全部通过 ✅ |
-| **合计** | **67/67 全部通过** ✅ |
-| 全项目无未引用/已删除文件 | 0 冗余 ✅ |
-| SDK 源码验证 | `ilspycmd` 确认 `Opc.Ua.Server.dll` 1.5.378.145 中 `AddPredefinedNode` 自带 O(1) 节点通知 ✅ |
-| CSV 格式验证 | 6 列模板文件结构正确 ✅ |
+| `dotnet test Tests/OpcDaToUaGateway.Tests.csproj` | **100/100 通过** ✅ |
+| ├─ 原有测试（78） | 78/78 ✅ 无回归 |
+| └─ `BrowseLogRouterTests`（新增 22） | 22/22 ✅（高频诊断→文件、里程碑→UI、`[DCOM]` 只进日志不进状态栏） |
+| 反编译核实（TitaniumAS 1.0.2） | `OpcBrowse.Browse` 吞异常返回空；`OpcDaBrowserAuto` 优先 Browser3；默认 `GetElements` 不带属性；`OpcConfiguration.BatchSize=1024` ✅ |
 
-> **未执行运行时验证**：需要 OPC DA 服务器（如 Matrikon / Kepware）配合验证，非测试环境无法确认。
+> **未执行**：需现场 `pSpace.OPCServer`（3.5 万标签）+ UaExpert 的运行时验证；长时间稳定性测试。
 
 ---
 
 ## 9. 下一步计划
 
-优化与稳定性工作已全部完成，当前无待办：
+### 待用户拍板 / 现场验证
 
-| 项目 | 优先级 | 状态 |
-| --- | --- | --- |
-| 启动性能修复 | P0 | ✅ 已完成（V1.8.1） |
-| ponytail 代码清理 | P0 | ✅ 已完成（V1.9.0） |
-| DA 标签真实数据类型获取 | P0 | ✅ 已完成（V2.0.0） |
-| 全面代码审查修复 | P0 | ✅ 已完成（V2.2.0） |
-| 安全增强与代码质量优化 | P0 | ✅ 已完成（V2.3.0） |
-| 稳定性增强 | P0 | ✅ 已完成（V2.4.0） |
-| 代码审查修复（第二轮） | P0 | ✅ 已完成（V2.5.0） |
-| 多 DA 聚合扩展 | P1 | 🟡 待规划（需 `DaConfigs: List<OpcDaConfig>` + UA 前缀） |
-| 授权算法 HMAC→ECDSA P-256 | P1 | 🟡 待规划（需兼容旧 PCID 数据） |
-| 崩溃恢复预案 | ? 低 | 参考文档 `故障恢复预案.md` |
+| 事项 | 说明 |
+| --- | --- |
+| `pSpace` 扫描结果复核 | 用新 exe 对 `pSpace.OPCServer` 重扫，确认扫到 3.5 万点位；若仍 0，把诊断弹窗截图发来 |
+| UA 标签复核 | UaExpert 展开 `Objects → OPC DA Tags → 模拟站`，确认 `Batch_000`(1–1000) … `Batch_034` |
+| 试用到期复现 | 跑满 30 分钟观察：网关停止 + 看门狗进程消失 + 程序退出；重开仅「启动网关」置灰；「关于」授权后恢复 |
+| 提交/发布 | 工作区改动尚未提交 git；是否 `git commit`（如 `release: V2.8.0`） |
 
-**推荐顺序**：
+### 建议优先修（技术债）
 
-1. ✅ V1.8.1 启动性能修复
-2. ✅ V1.9.0 全面代码清理
-3. ✅ V2.0.0 DA 标签真实数据类型获取
-4. ✅ V2.2.0 String 类型修复 + CSV 6 列统一 + 按钮导航移除 + 图标更新 + 接口抽象 + 单元测试
-5. ✅ V2.3.0 安全增强 + 代码质量优化 + 架构优化
-6. ✅ V2.4.0 试用持久化 + 自动启动/DA 重连/读取生命周期稳定性增强
-7. ✅ V2.5.0 代码审查修复第二轮（DI 失效、并发竞态、健康监控失效、异常处理）
-8. 等待用户明确指示再推进
+1. `ItemSelectionDialog` 右键误切换 / 拖拽切换错误行（历史遗留）
+2. `ComputeUaBrowsePath` 同步 Batch 层级（若启用导出 BrowsePath）
+3. 补齐 `pSpace`/FLAT 服务器浏览的自动化测试（需 DA 服务器模拟）
 
 ---
 
@@ -413,35 +244,33 @@
 
 > 复制以下内容到新对话窗口即可接续：
 >
-> 我是 OPC DA→UA 协议转换网关（OpcDaToUaGateway）维护助手。项目目录：D:\Documents\Reasonix\OpcDa2Ua
+> 我是 OPC DA→UA 协议转换网关（OpcDaToUaGateway）维护助手。项目目录：**`D:\Documents\Code\OpcDa2Ua`**
 >
-> 先读取以下文件建立上下文：
+> 先读取 **`handoff.md`**（交接文档，含 10 节结构），必要时再读 `docs/OPC_DA转UA网关开发指南.md`、`docs/STATUS.md`。
 >
-> - D:\Documents\Reasonix\OpcDa2Ua\handoff.md（项目交接文档，含 10 节结构）
-> - D:\Documents\Reasonix\OpcDa2Ua\STATUS.md（状态看板）
-> - D:\Documents\Reasonix\OpcDa2Ua\OPC_DA转UA网关开发指南.md（架构/版本历史）
+> **当前状态（2026-11-03，V2.8.0，未提交 git）**：
+> - Debug/Release 0 警告 0 错误；测试 **100/100**（原 78 + `BrowseLogRouterTests` 22）
 >
-> 项目现状摘要（截至 2026-08-06）：
+> **本会话解决的问题**：
+> 1. 大规模浏览 DA 标签「未响应」→ 浏览诊断日志分流（高频只落文件，`LogManager.AppendFileOnly`）
+> 2. 浏览慢/看不到点位 → 边扫描边显示（每 1000 点位增量投递）+ 类型探测去冗 + 阶段耗时日志
+> 3. `pSpace.OPCServer` 扫描 0 点位 → 放宽下钻 + `RootSafeBrowser2` + `Browser2/Browser1` 兜底 + `OPC_FLAT` 全量枚举
+> 4. UA 客户端扫不到标签 → 分支变量统一分组到 `Batch_NNN`（避免单文件夹 3.5 万子节点不可见）
+> 5. 试用到期行为 → 到期只关闭主程序与 Watchdog、可重开，未授权禁用「启动网关」，授权后恢复
 >
-> - 版本 V2.5.0，Debug + Release 均 0 警告 / 0 错误
-> - ponytail 代码清理 8 项完成（删除 GateController.cs、GatewayFactory.cs，新建 LicenseManager.cs，MainForm 直接委托，SafeInvoke 通用化等），移除旧客户端列表功能
-> - 性能修复：V1.8.0 移除节点 Diag，V1.8.1 节点创建走后台线程
-> - DA 标签真实数据类型获取：V2.0.0（临时 Group + CanonicalDataType）
-> - String 类型标签修复：V2.2.0（移除排除逻辑）
-> - CSV 导出统一 6 列格式含 UA 完整路径：V2.2.0
-> - 按钮导航移除：V2.2.0
-> - 图标更新为 opc-da-opc-ua.ico：V2.2.0
-> - 接口抽象与单元测试：V2.2.0（IOpcDaClient/IGatewayOpcUaServer/IDataBridge 接口化，FakeGatewayOpcUaServer Mock，56 个 xUnit 测试全部通过）
-> - 安全增强：V2.3.0（授权码 AES 加密、OnValuesChanged 防护、ConvertValue 日志）
-> - 代码质量优化：V2.3.0（锁策略拆分、定时器泄漏修复、SafeInvoke 死锁修复、FormClosing 简化、TryReconnect 竞态修复）
-> - 架构优化：V2.3.0（AutoStartManager 分离、BuildUI 拆分为 9 子方法、常量统一、注释清理）
-> - 稳定性增强：V2.4.0（DPAPI 试用累计时间持久化、单一自动启动 Timer、Sync 重连保持模式、同步 Read 重入门禁与安全清理、ConfigManager 保存失败反馈、66/66 测试通过）
-> - 代码审查修复第二轮：V2.5.0（GatewayManager DI 失效、GatewayOpcUaServer 并发启动/DataBridge 字段竞态/ConfigManager 授权码恢复/HealthSnapshot 健康监控失效/Program 异常处理器前移/ItemSelectionDialog 远程主机与虚拟模式按钮/LicenseManager PCID 与试用状态/DPAPI 作用域收紧，67/67 测试通过）
-> - 不能动边界：GatewayOpcUaServer.cs 内部/修改节点逻辑、OpcDaClient.cs、ConfigManager.cs、WatchdogManager.cs、Models/LicenseAlgorithm.cs、Theme.cs、AppConstants.cs、Watchdog/、Keygen/、IHealthSnapshot.cs
-> - 当前无待办，等待用户明确指示再推进
+> **重要的 API / 行为事实（实测或反编译确认，勿凭记忆推翻）**：
+> - `TitaniumAS.OpcBrowse.Browse` 内部 `catch(Exception){break;}` **吞异常返回空数组** → `OpcDaBrowserAuto` 在「空但不抛异常」时**不回退**
+> - `OpcDaBrowserAuto` 优先 `OpcDaBrowser3`(`IOPCBrowse`)；`OpcConfiguration.BatchSize=1024` 分页；默认 `GetElements` **不取元素属性** → `ExtractDataType` 恒 `Variant`
+> - FLAT 命名空间服务器需 DA2 `BrowseOPCItemIDs(OPC_FLAT)`（OPC Foundation issue #878）
+> - 部分服务器对 `ChangeBrowsePosition(OPC_BROWSE_TO,"")` 报 E_FAIL；`OpcDaBrowser1` 根层用 `OPC_BROWSE_UP` 回根不受影响
+> - UA 单文件夹直接子节点过多 → 客户端 Browse 不到（H-24/H-24-1）；分批阈值 `UaFlatBatchSize = 1000`
+> - `LogManager.UpdateTextBox` 每次 O(文本长度)；**高频日志必须走 `AppendFileOnly`**
+> - 项目是 **x86**；主 exe 经 Costura 合并不能被直接引用
 >
-> 不要擅自修改代码，除非用户明确要求你做什么，或少量补遗。遵循用户指令。
+> **不能动的边界**：`GatewayOpcUaServer.cs` 节点/订阅/`UpdateValue` 核心、`OpcDaClient.cs` COM 连接/断开、`ConfigManager.cs`、`WatchdogManager.cs`、`Models/LicenseAlgorithm.cs`、`Theme.cs`/`AppConstants.cs`、`Watchdog/`、`Keygen/`、`IHealthSnapshot.cs`。另 `TagSnapshot.Timestamp` 内存中必须保持 UTC。
+>
+> 不要擅自修改代码，除非用户明确要求。遵循用户指令。
 
 ---
 
-*本 handoff.md 由当前会话生成，2026-08-06。STATUS.md / OPC_DA转UA网关开发指南.md / 使用文档.md 配合使用。*
+*本 handoff.md 由当前会话生成，2026-11-03。历史版（V1.8.0–V2.7.0）可经 `git show HEAD:handoff.md` 取回。*

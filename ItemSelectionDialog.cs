@@ -28,7 +28,10 @@ namespace OpcDaToUaGateway
         private Timer _timer;         // 新增：计时器
 
         private readonly string _serverProgId;
-        private readonly Action<string> _logger;  // 日志委托，用于显示诊断信息
+        private readonly Action<string> _logger;  // 日志委托，用于显示诊断信息（UI + 文件）
+        // 仅文件日志委托：高频浏览诊断（分支摘要/进度/数据类型批次）只落文件，
+        // 不做 UI 线程封送，避免大规模服务器浏览时把对话框拖成「未响应」。
+        private readonly Action<string> _fileOnlyLogger;
         private readonly ushort _namespaceIndex;   // OPC UA 命名空间索引，用于预分配 NodeId
         // H-21 修复：将服务器主机名作为参数传入，而非硬编码 "localhost"，支持远程 DA 服务器浏览。
         private readonly string _serverHost;
@@ -39,6 +42,15 @@ namespace OpcDaToUaGateway
         private Timer _filterDebounce;
         // P5 修复：缓存已勾选项的 ItemId 集合，过滤时保留勾选状态
         private readonly HashSet<string> _checkedItemIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 浏览诊断环形缓冲：保留最近若干条浏览消息，供"0 点位"时在提示弹窗中展示，便于定位。
+        // 高频诊断（根层统计、分支摘要、备用浏览器结果等）只落文件、界面上看不到，这里单独留一份。
+        private readonly List<string> _browseDiag = new List<string>();
+        private readonly object _browseDiagLock = new object();
+        private const int BrowseDiagKeep = 40;
+        // 行点击切换勾选时的辅助状态：鼠标按下时命中的 ItemId 及其当时的勾选状态。
+        // 在 MouseDown/MouseUp 之间比对，用于识别原生复选框点击，避免重复切换。
+        private string _mouseDownItemId;
+        private bool _checkedAtMouseDown;
 
         // 计时器相关字段
         private DateTime _startTime;  // 浏览开始时间
@@ -63,12 +75,14 @@ namespace OpcDaToUaGateway
         /// 创建浏览对话框，并传入日志委托用于显示诊断信息，以及命名空间索引用于预分配 NodeId。
         /// </summary>
         /// <param name="host">OPC DA 服务器主机名（H-21 修复：支持远程服务器，默认 "localhost"）</param>
-        public ItemSelectionDialog(string serverProgId, Action<string> logger, ushort namespaceIndex = 2, string host = "localhost")
+        /// <param name="fileOnlyLogger">高频浏览诊断的仅文件日志委托（不刷 UI）；为空则丢弃高频诊断的持久化。</param>
+        public ItemSelectionDialog(string serverProgId, Action<string> logger, ushort namespaceIndex = 2, string host = "localhost", Action<string> fileOnlyLogger = null)
         {
             _serverProgId = serverProgId;
             _logger = logger;
             _namespaceIndex = namespaceIndex;
             _serverHost = host;
+            _fileOnlyLogger = fileOnlyLogger;
             BuildUI();
         }
 
@@ -179,6 +193,39 @@ namespace OpcDaToUaGateway
                 e.Item = lvi;
             };
             
+            // 行点击切换勾选：记录"鼠标按下时命中的行"及其当时的勾选状态，
+            // 待 MouseUp 时与当前状态比对，区分出"点在复选框上"（原生已处理）还是"点在行上"。
+            // 该判定只依赖勾选状态是否发生变化，不依赖事件触发顺序或复选框区域坐标，
+            // 因此在虚拟模式下也可靠。
+            _listView.MouseDown += (s, e) =>
+            {
+                _mouseDownItemId = null;
+                var hit = _listView.GetItemAt(e.X, e.Y);
+                if (hit == null) return;   // 空白区域：不切换
+
+                // 虚拟模式下 RetrieveVirtualItem 用 ItemId 作为 ListViewItem.Text，可直接作为 _checkedItemIds 的键
+                _mouseDownItemId = hit.Text;
+                _checkedAtMouseDown = _checkedItemIds.Contains(_mouseDownItemId);
+            };
+
+            _listView.MouseUp += (s, e) =>
+            {
+                string itemId = _mouseDownItemId;
+                _mouseDownItemId = null;
+                if (itemId == null) return;
+
+                // 勾选状态已被改变 → 原生 ListView 处理了复选框点击（ItemCheck 已记录），不再重复切换
+                if (_checkedItemIds.Contains(itemId) != _checkedAtMouseDown) return;
+
+                if (_checkedItemIds.Contains(itemId))
+                    _checkedItemIds.Remove(itemId);
+                else
+                    _checkedItemIds.Add(itemId);
+
+                // 虚拟模式：数据层已更新，重绘让该行复选框同步显示
+                _listView.Refresh();
+            };
+
             // 虚拟模式下处理勾选状态变化：数据层已记录；再触发局部刷新，让被点击的复选框立即显示勾选/取消。
             _listView.ItemCheck += (s, e) =>
             {
@@ -314,6 +361,12 @@ namespace OpcDaToUaGateway
             // 虚拟模式：通过设置 VirtualListSize = 0 清空显示
             _listView.VirtualListSize = 0;
 
+            // 边扫描边显示：先清空数据层，随扫描进度增量追加（避免残留上次结果导致重复）
+            _allItems.Clear();
+            _displayItems.Clear();
+            _checkedItemIds.Clear();
+            lock (_browseDiagLock) { _browseDiag.Clear(); }
+
             // 启动计时器
             _elapsedSeconds = 0;
             _startTime = DateTime.Now;
@@ -328,17 +381,34 @@ namespace OpcDaToUaGateway
                     // H-21 修复：使用构造函数传入的 _serverHost，而非硬编码 "localhost"
                     var items = OpcDaClient.BrowseAllItems(_serverProgId, _serverHost, msg =>
                     {
-                        // 所有诊断消息写入文件日志，方便离线排查
-                        _logger?.Invoke($"[Browse] {msg}");
-                        // UI 线程上更新状态标签（只显示关键信息，避免刷屏）
-                        SafeBeginInvoke(() =>
+                        // 留存最近若干条浏览诊断，供"0 点位"时在提示弹窗中展示（高频诊断不刷 UI）。
+                        lock (_browseDiagLock)
                         {
-                            if (msg.Contains("尝试连接") || msg.Contains("连接成功") ||
-                                msg.Contains("浏览完成") || msg.Contains("失败"))
-                            {
-                                _lblStatus.Text = msg.Replace("[Browse] ", "");
-                            }
-                        });
+                            _browseDiag.Add(msg);
+                            if (_browseDiag.Count > BrowseDiagKeep) _browseDiag.RemoveAt(0);
+                        }
+
+                        // 诊断消息分流，避免大规模服务器（>1 万点位、分支多）浏览时把 UI 拖成「未响应」：
+                        //   里程碑（连接/完成/上限/失败/[DCOM]）→ 进 UI 运行日志，并按需同步状态栏；
+                        //   高频诊断（分支摘要 / 进度 / 数据类型批次）→ 仅写文件日志，不做 UI 线程封送。
+                        // 原因：逐条经 LogManager.UpdateTextBox 刷 UI 文本框是 O(n²)，
+                        // 数千条以上即会占满 UI 线程（与 V1.7.0 / V1.8.0 卡顿根因同型）。
+                        if (BrowseLogRouter.IsUiMilestone(msg))
+                        {
+                            _logger?.Invoke(msg);
+                            if (BrowseLogRouter.IsLabelMilestone(msg))
+                                SafeBeginInvoke(() => { _lblStatus.Text = msg.Replace("[Browse] ", ""); });
+                        }
+                        else
+                        {
+                            _fileOnlyLogger?.Invoke(msg);
+                        }
+                    },
+                    delta =>
+                    {
+                        // 边扫描边显示：后台每发现一批点位（DaBrowseStreamChunk 个）就增量投递到列表，
+                        // 避免点位量大（>1 万）时长时间列表为空、让用户以为扫描不到点位。
+                        SafeBeginInvoke(() => AppendDiscoveredItems(delta));
                     });
 
                     SafeBeginInvoke(() => OnBrowseComplete(items));
@@ -374,6 +444,25 @@ namespace OpcDaToUaGateway
             }
         }
 
+        /// <summary>
+        /// 浏览过程中增量追加已发现的点位（仅在 UI 线程调用）。
+        /// 大规模点位（&gt;1 万）时让列表边扫描边增长，而不是等全部完成才显示。
+        /// 最终 <see cref="OnBrowseComplete"/> 会以完整结果重刷（此时数据类型已填充），此处只做渐进预览。
+        /// </summary>
+        private void AppendDiscoveredItems(IReadOnlyList<OpcDaItemInfo> delta)
+        {
+            if (delta == null || delta.Count == 0) return;
+
+            _allItems.AddRange(delta);
+            _displayItems.AddRange(delta);
+            foreach (var it in delta)
+                _checkedItemIds.Add(it.ItemId);   // 新发现的点位默认勾选
+
+            _listView.VirtualListSize = _displayItems.Count;
+            _listView.Invalidate();   // 让新出现的行立即绘制
+            _lblStatus.Text = $"正在浏览... 已发现 {_allItems.Count} 个点位";
+        }
+
         private void OnBrowseComplete(List<OpcDaItemInfo> items)
         {
             _timer.Stop();
@@ -402,9 +491,22 @@ namespace OpcDaToUaGateway
             if (_allItems.Count == 0)
             {
                 _logger?.Invoke($"[Browse] ⚠️ 浏览返回 0 个点位！");
+
+                // 把最近若干条浏览诊断附在提示里：高频诊断只落文件、界面上看不到，
+                // 这里直接展示（根层统计 / 备用浏览器结果），便于当场判断是"服务器未公开点位"
+                // 还是"浏览策略/接口不兼容"。
+                string diagText = "";
+                lock (_browseDiagLock)
+                {
+                    if (_browseDiag.Count > 0)
+                        diagText = "\n\n— 浏览诊断（最近 " + _browseDiag.Count + " 条）—\n" +
+                                   string.Join("\n", _browseDiag);
+                }
+
                 MessageBox.Show(
                     "未在服务器上找到任何点位（标签）。\n" +
-                    "可能该服务器没有公开点位，或者服务器未正常运行。",
+                    "可能该服务器没有公开点位，或者服务器未正常运行。" +
+                    diagText,
                     "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
@@ -845,6 +947,42 @@ namespace OpcDaToUaGateway
 
             DialogResult = DialogResult.OK;
             Close();
+        }
+    }
+
+    /// <summary>
+    /// 点位浏览诊断消息的路由判定。
+    /// <para>大规模 OPC DA 服务器（&gt;1 万点位、分支多）浏览时会产生数千至上万条诊断日志
+    /// （每个分支一条摘要 + 每 2000 点位一条进度 + 每 500 点位一条数据类型批次）。
+    /// 若逐条封送到 UI 线程更新运行日志文本框，<c>TextBox.AppendText</c> 累计 O(n²)，
+    /// 会把对话框拖成「未响应」。因此仅让低频「里程碑」消息进入 UI，
+    /// 高频诊断只落文件日志（<see cref="OpcDaToUaGateway.Services.LogManager.AppendFileOnly"/>）。</para>
+    /// </summary>
+    internal static class BrowseLogRouter
+    {
+        /// <summary>里程碑：需要显示在 UI 运行日志（同时也会写文件）的消息。</summary>
+        public static bool IsUiMilestone(string msg)
+        {
+            if (string.IsNullOrEmpty(msg)) return false;
+
+            return msg.IndexOf("尝试连接 OPC DA 服务器", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("连接成功", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("浏览完成，共获取", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("连接 OPC DA 服务器失败", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("已达最大点位上限", StringComparison.Ordinal) >= 0
+                || msg.StartsWith("[DCOM]", StringComparison.Ordinal);
+        }
+
+        /// <summary>需要同步到对话框状态栏的里程碑（阶段关键信息，不含 [DCOM] 诊断细节）。</summary>
+        public static bool IsLabelMilestone(string msg)
+        {
+            if (string.IsNullOrEmpty(msg)) return false;
+
+            return msg.IndexOf("尝试连接 OPC DA 服务器", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("连接成功", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("浏览完成，共获取", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("连接 OPC DA 服务器失败", StringComparison.Ordinal) >= 0
+                || msg.IndexOf("已达最大点位上限", StringComparison.Ordinal) >= 0;
         }
     }
 }

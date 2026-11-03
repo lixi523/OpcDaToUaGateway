@@ -1,7 +1,7 @@
 ﻿# OPC_DA转UA网关 — 项目状态报告
 
-**生成时间：** 2026-09-15
-**当前版本：** V2.6.0
+**生成时间：** 2026-11-03
+**当前版本：** V2.8.0
 **编译状态：** 0 警告 0 错误 ✅
 
 ---
@@ -13,6 +13,7 @@
 **状态：全部执行完毕，编译通过，版本号已升级到 V2.6.0。**
 
 > **版本演进（自 V1.5.0 起，详见 handoff.md / 开发指南版本历史）：**
+> - **V2.8.0（2026-11-03）**：DA 标签浏览性能与兼容性修复 + 试用到期行为修正 + 版本升级——① 修复大规模服务器（>1 万点位）浏览时点位浏览窗口「未响应」（浏览诊断日志分流，高频诊断只落文件）；② 浏览改为边扫描边显示（每 1000 点位增量投递）；③ 浏览兼容性增强（下钻不依赖 `HasChildren`、新增根层友好的 `RootSafeBrowser2`、0 点位时回退 DA2/DA1 并最终 `OPC_FLAT` 全量枚举）；④ 数据类型填充只探测未知类型；⑤ 试用到期仅关闭主程序与看门狗、可重新打开，未授权时禁用「启动网关」、授权后恢复；⑥ 三个 csproj 统一升至 2.8.0。Debug/Release 0 警告 0 错误，100/100 测试通过。
 > - **V2.6.0（2026-09-15）**：代码审查报告 P0/P1 修复——DataBridge 订阅幂等与 null 安全、OpcDaClient 批量重建字典 O(n²)→锁外预构建+锁内原子替换、OnValuesChanged 批次异常限流、Cleanup 超时分支由永不超时改为有界 30s 并直接释放 COM、Program 空 catch 记录二次异常、LogManager 注释修正、_cachedTypes 改 ConcurrentDictionary；Keygen/ 源码目录从仓库移除（本地保留，.gitignore 防止重新纳入）。Debug/Release 0 警告 0 错误，67/67 测试通过。
 > - **V2.5.0（2026-08-06）**：代码审查修复第二轮——GatewayManager.StartAsync 构造函数注入失效（局部变量覆盖字段）修复，EffectiveMaxReconnectAttempts 快照，HealthSnapshot.RotateOldSnapshots 移到锁外，ConfigManager 临时文件改 GUID，Program.cs 异常处理器前移并防护 MessageBox 二次崩溃，AutoStartManager WScript.Shell null 友好错误，ItemSelectionDialog 遗留构造函数 [Obsolete]；测试文件修复：5 处同步方法误用 ThrowsAnyAsync、DeriveKey 断言优化、Task.Delay 时序测试改 ManualResetEventSlim。Debug/Release 0 警告 0 错误，67/67 测试通过。
 

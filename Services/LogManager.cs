@@ -60,6 +60,28 @@ catch (ObjectDisposedException) { /* M-11 修正：Form 已释放，UI 更新无
 catch (InvalidOperationException) { /* M-11 修正：控件已销毁，UI 更新无意义，有意忽略 */ }
             }
 
+            EnqueueFileLine(fileLine);
+        }
+
+        /// <summary>
+        /// 仅写入文件日志，<b>不更新 UI 文本框</b>。
+        /// <para>用于高频诊断输出（如 OPC DA 地址空间浏览的分支摘要 / 进度 / 数据类型批次）。
+        /// 这些消息数量可达数千至上万条，若逐条经 <see cref="Append"/> 封送到 UI 线程，
+        /// <see cref="UpdateTextBox"/> 每次 O(文本长度)、累计 O(n²)，会把窗口拖成「未响应」
+        /// （与 V1.7.0 / V1.8.0 的 UI 卡顿根因同型）。</para>
+        /// 文件日志通道不受影响，离线排查仍可获取全部诊断。
+        /// </summary>
+        public void AppendFileOnly(string message)
+        {
+            if (_disposed) return;
+
+            string now = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            EnqueueFileLine($"[{now}] {message}");
+        }
+
+        /// <summary>将一条已格式化的日志写入异步文件队列（含队列满丢弃告警），不触碰 UI。</summary>
+        private void EnqueueFileLine(string fileLine)
+        {
             try
             {
                 if (!_queue.TryAdd(fileLine))
@@ -78,7 +100,8 @@ catch (Exception ex) { Debug.WriteLine($"[Log] 写入失败: {ex.Message}"); }
                     }
                 }
             }
-catch (InvalidOperationException) { /* TextBox已销毁，忽略 */ }
+catch (ObjectDisposedException) { /* 队列已释放，忽略 */ }
+            catch (InvalidOperationException) { /* 队列已完成添加，忽略 */ }
         }
 
         public void CleanupOldFiles()

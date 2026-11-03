@@ -57,6 +57,12 @@ namespace OpcDaToUaGateway
         private int _flatBatchCount;        // 当前批次数（已创建的批量子文件夹数）
         private int _flatCurrentBatchCount; // 当前批次的变量计数
 
+        // 大分支分批：按分支路径累计「直接挂在分支文件夹下」的变量数，
+        // 超过 UaFlatBatchSize 后改挂到该分支下的 Batch_NNN 子文件夹，
+        // 避免单节点引用数过多触发 UA 客户端 Browse 不到的 SDK 边界条件
+        // （H-24-1 当初只对无分支场景做了分批，这里补上有分支的大文件夹）。
+        private readonly Dictionary<string, int> _branchChildCount = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>
         /// 创建节点管理器实例。
         /// </summary>
@@ -145,6 +151,9 @@ namespace OpcDaToUaGateway
                     branchPath = itemId.Substring(0, lastDot);
 
                 FolderState parentFolder = GetOrCreateFolder(branchPath);
+                // 大分支分批：单个分支文件夹直接子节点数过多会让 UA 客户端 Browse 不到（H-24-1 同型边界条件）
+                if (!string.IsNullOrEmpty(branchPath))
+                    parentFolder = GetOrCreateBranchBatchFolder(branchPath, parentFolder);
 
                 var variable = new BaseDataVariableState(null)
                 {
@@ -261,6 +270,48 @@ namespace OpcDaToUaGateway
             }
 
             return parent;
+        }
+
+        /// <summary>
+        /// 分支变量分组：把某分支下的变量统一挂到该分支的 Batch_NNN 子文件夹
+        /// （Batch_000 装 1..UaFlatBatchSize，Batch_001 装下一批…），使分支文件夹本身
+        /// 只保留 Batch 子文件夹，避免「直接子节点过多 → UA 客户端 Browse 不到」，
+        /// 同时与无分支场景（FlatTags/Batch_NNN）保持一致的浏览结构。
+        /// </summary>
+        private FolderState GetOrCreateBranchBatchFolder(string branchPath, FolderState baseFolder)
+        {
+            int count;
+            _branchChildCount.TryGetValue(branchPath, out count);
+            count++;
+            _branchChildCount[branchPath] = count;
+
+            int batchIdx = (count - 1) / AppConstants.UaFlatBatchSize;   // Batch_000, Batch_001, ...
+            string cacheKey = branchPath + "\u0001Batch:" + batchIdx;
+            if (_folderCache.TryGetValue(cacheKey, out FolderState existing))
+                return existing;
+
+            string batchNodeId = $"Folder_{SafeIdPart(branchPath)}_B{batchIdx:D3}";
+            var batchFolder = CreateSimpleFolder(
+                batchNodeId,
+                $"Batch_{batchIdx:D3}",
+                $"Batch {batchIdx:D3}",
+                $"Batched variables of branch '{branchPath}' (batch size {AppConstants.UaFlatBatchSize})");
+
+            baseFolder.AddChild(batchFolder);
+            AddPredefinedNode(SystemContext, batchFolder);
+            _folderCache[cacheKey] = batchFolder;
+            Diag($"[诊断] 分支变量分组：{branchPath} → {batchNodeId}（Batch_{batchIdx:D3}）");
+            return batchFolder;
+        }
+
+        /// <summary>把路径转成可用于 NodeId 字符串的安全片段（保留中英文数字，其余替换为 '_'）。</summary>
+        private static string SafeIdPart(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "root";
+            var sb = new System.Text.StringBuilder(s.Length);
+            foreach (char c in s)
+                sb.Append(char.IsLetterOrDigit(c) ? c : '_');
+            return sb.ToString();
         }
 
         /// <summary>
@@ -737,8 +788,9 @@ namespace OpcDaToUaGateway
 
                 OnStatusChanged?.Invoke("正在检查/创建应用证书...");
 
-                // 检查应用证书是否存在且有效，如果不存在则自动生成自签名证书。
-                bool haveCert = await _appInstance.CheckApplicationInstanceCertificatesAsync(false);
+                // 检查应用证书是否存在且有效，如果不存在则自动生成自签名证书；
+                // 已存在但无效时自动清理重建（见 CheckOrCreateCertificateWithRecoveryAsync）。
+                bool haveCert = await CheckOrCreateCertificateWithRecoveryAsync(config, ownStorePath);
                 if (!haveCert)
                     throw new Exception("无法创建或加载 OPC UA 应用证书，请检查 Certificates 目录权限");
 
@@ -787,6 +839,136 @@ namespace OpcDaToUaGateway
             {
                 // H-05 修复：无论成功或失败都重置启动标志，允许下次重试
                 Interlocked.Exchange(ref _startingFlag, 0);
+            }
+        }
+
+        /// <summary>
+        /// 检查/创建应用证书，并在证书无效（过期、换机、目录搬迁）时自动清理重建。
+        /// 
+        /// 背景：UA SDK 的 <c>ApplicationInstance.CheckApplicationInstanceCertificatesAsync</c> 只在
+        /// <b>找不到</b>证书时才创建新证书。若 <c>Certificates\Own</c> 下已存在一张<b>无效</b>的证书
+        /// （自签名证书默认 12 个月有效期；或整目录从别的机器复制而来，主题中的机器名与当前环境不符），
+        /// SDK 会走"校验失败"分支并抛 ServiceResultException。
+        /// 由于本类构造 <c>ApplicationInstance</c> 时未提供 <c>MessageDlg</c>，SDK 无从询问用户
+        /// "是否仍要使用该证书"，只能静默拒绝 —— 于是每次启动都必然失败，只能人工删目录。
+        /// 
+        /// 这里在该特定异常上做一次"删除 Own 目录内容 → 重建"的补救，使换机、目录搬迁、
+        /// 证书过期等场景都能自愈。仅重试一次，避免其他原因导致的无限循环。
+        /// 
+        /// 注：两次调用都传 silent=true。实测 silent 取值在此处不影响结果 ——
+        /// 因为 MessageDlg 为 null，SDK 的 ApproveMessageAsync 无论如何都返回"拒绝"。
+        /// 传 true 只是让意图显式，避免误以为 false 会弹窗。
+        /// </summary>
+        /// <param name="config">已通过 ValidateAsync 的应用配置。</param>
+        /// <param name="ownStorePath">应用证书目录（Certificates\Own）。</param>
+        /// <returns>证书是否可用。</returns>
+        private async Task<bool> CheckOrCreateCertificateWithRecoveryAsync(
+            ApplicationConfiguration config, string ownStorePath)
+        {
+            try
+            {
+                return await _appInstance.CheckApplicationInstanceCertificatesAsync(true);
+            }
+            catch (ServiceResultException ex) when (IsInvalidCertificateError(ex))
+            {
+                OnStatusChanged?.Invoke("  ⚠ 应用证书无效或私钥不可用（可能已过期，或从其他机器复制而来），正在自动重建...");
+
+                if (!TryDeleteOwnCertificates(ownStorePath))
+                {
+                    // 清理不完整 → 残留证书会让重试再次失败，直接抛出原始异常，
+                    // 上面已打印具体哪些文件删不掉、如何人工处理
+                    OnStatusChanged?.Invoke("  ✗ 自动清理未完成，请关闭占用该目录的其他程序，"
+                        + "或手动删除 Certificates\\Own 目录后重启");
+                    throw;
+                }
+
+                // 重建 ApplicationInstance：原实例内部已缓存了旧证书的查找结果
+                _appInstance = new ApplicationInstance(config, null);
+                OnStatusChanged?.Invoke("  已清理旧证书，正在生成新的自签名证书...");
+
+                try
+                {
+                    return await _appInstance.CheckApplicationInstanceCertificatesAsync(true);
+                }
+                catch (Exception)
+                {
+                    // 走到这里说明证书问题并非"删掉就能解决"（如目录无写权限）。
+                    // 补充人工处理指引，避免用户只看到一条无从下手的原始异常。
+                    OnStatusChanged?.Invoke("  ✗ 重建应用证书仍失败，请检查 Certificates 目录写入权限，"
+                        + "或手动删除 Certificates\\Own 目录后重启");
+                    throw;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 判断异常是否属于"证书本身不可用、删除后重建即可自愈"的一类故障。
+        /// 
+        /// 覆盖 SDK 在 <c>CheckOrCreateCertificateAsync</c> 中两条会因证书损坏/不匹配而中断的路径：
+        /// <list type="bullet">
+        /// <item>证书存在但校验不通过（过期、密钥过小、ApplicationUri/域名不匹配）
+        /// → "The certificate with subject ... in the configuration is invalid."</item>
+        /// <item>证书在库中但私钥无法加载（目录从别的机器复制而来时常见）
+        /// → "Cannot access private key for certificate with thumbprint=..."</item>
+        /// </list>
+        /// 二者都只对 BadConfigurationError 生效，避免把权限不足、磁盘故障等
+        /// 同样以该状态码报出的问题误判为证书问题而删除证书。
+        /// </summary>
+        private static bool IsInvalidCertificateError(ServiceResultException ex)
+        {
+            if (ex.StatusCode != StatusCodes.BadConfigurationError || ex.Message == null)
+                return false;
+
+            const string invalidMarker = "in the configuration is invalid";
+            const string noPrivateKeyMarker = "Cannot access private key for certificate";
+
+            return ex.Message.IndexOf(invalidMarker, StringComparison.OrdinalIgnoreCase) >= 0
+                || ex.Message.IndexOf(noPrivateKeyMarker, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// 清空 Own 目录下的证书文件（递归删除其下所有文件），目录本身保留
+        /// （上层已创建并可能缓存了路径）。
+        /// 
+        /// 任一文件删除失败即返回 false：残留的旧证书会让上层的重建重试再次失败，
+        /// 此时必须走"提示人工删除"分支，而不是谎报清理成功。
+        /// </summary>
+        /// <returns>是否已完全清理（目录不存在视为已清理成功）。</returns>
+        private bool TryDeleteOwnCertificates(string ownStorePath)
+        {
+            try
+            {
+                if (!Directory.Exists(ownStorePath))
+                    return true;
+
+                var failures = new List<string>();
+                foreach (var file in Directory.EnumerateFiles(ownStorePath, "*", SearchOption.AllDirectories))
+                {
+                    try
+                    {
+                        File.Delete(file);
+                    }
+                    catch (Exception ex)
+                    {
+                        // IOException：文件被占用（另一个网关实例 / 杀毒扫描 / SDK 自身残留句柄）
+                        // UnauthorizedAccessException：NTFS 权限不足
+                        // 单个文件失败不中断枚举，但必须记录下来
+                        failures.Add($"{Path.GetFileName(file)} — {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+
+                if (failures.Count == 0)
+                    return true;
+
+                OnStatusChanged?.Invoke($"  ✗ {failures.Count} 个证书文件无法删除（可能被其他进程占用或权限不足）:");
+                foreach (var f in failures)
+                    OnStatusChanged?.Invoke("      " + f);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                OnStatusChanged?.Invoke($"  清理证书目录异常: {ex.Message}");
+                return false;
             }
         }
 

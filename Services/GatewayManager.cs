@@ -254,6 +254,14 @@ namespace OpcDaToUaGateway.Services
                 if (ex.InnerException != null)
                     _log.Append($"  内部异常: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
 
+                // 保留 SDK 原始英文异常，仅在其后附加中文诊断提示（端口绑定类问题最易被误判）
+                string portHint = PortBindDiagnostic.Describe(ex, _config.OpcUa.Port);
+                if (!string.IsNullOrEmpty(portHint))
+                {
+                    foreach (var line in portHint.Split('\r', '\n'))
+                        _log.Append("  " + line);
+                }
+
                 // 回滚已创建资源
                 _log.Append("正在回滚已创建资源...");
                 lock (_lock)
